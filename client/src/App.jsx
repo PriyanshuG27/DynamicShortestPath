@@ -233,6 +233,16 @@ export default function App() {
           updateEdgeValues(edgeIdx, event.newWeight, event.newSigma);
         }
 
+        const updatedDist = safeArray(event.dist);
+        const updatedPrev = safeArray(event.prev);
+        const sourceId = typeof event.source === "number" ? event.source : source;
+
+        if (updatedDist.length > 0) {
+          applyDistances(updatedDist);
+          const target = chooseTarget(updatedDist, sourceId);
+          setOptimalPath(buildPath(updatedPrev, sourceId, target));
+        }
+
         const affected = safeArray(event.affectedNodes).map((x) => Number(x));
         const validAffected = affected.filter((x) => Number.isFinite(x));
 
@@ -255,7 +265,7 @@ export default function App() {
         }));
       }
 
-      if (eventType === "adversarial" || eventType === "adversarial_update") {
+      if (eventType === "adversarial_update") {
         const edgeIdx = Number(event.edgeIdx);
         if (Number.isFinite(edgeIdx)) {
           setFlashingEdges([edgeIdx]);

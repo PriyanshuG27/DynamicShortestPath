@@ -4,3 +4,4 @@ flask-cors
 osmnx
 scikit-learn
 numpy
+    

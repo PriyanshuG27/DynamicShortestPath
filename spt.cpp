@@ -30,6 +30,19 @@ std::string sptJsonDouble(double value) {
     return out.str();
 }
 
+std::string sptJsonArray(const std::vector<double>& values) {
+    std::ostringstream out;
+    out << "[";
+    for (std::size_t i = 0; i < values.size(); ++i) {
+        if (i > 0) {
+            out << ",";
+        }
+        out << sptJsonDouble(values[i]);
+    }
+    out << "]";
+    return out.str();
+}
+
 std::string sptJsonArray(const std::vector<int>& values) {
     std::ostringstream out;
     out << "[";
@@ -131,6 +144,8 @@ SelectiveResult handleEdgeUpdate(
         json << "\"recomputeSkipped\":true,";
         json << "\"nodesRecomputed\":0,";
         json << "\"affectedNodes\":[],";
+        json << "\"dist\":" << sptJsonArray(dist) << ",";
+        json << "\"prev\":" << sptJsonArray(prev) << ",";
         json << "\"timeMs\":" << sptJsonDouble(result.timeMs);
         json << "}";
 
@@ -152,6 +167,8 @@ SelectiveResult handleEdgeUpdate(
         json << "\"recomputeSkipped\":true,";
         json << "\"nodesRecomputed\":0,";
         json << "\"affectedNodes\":[],";
+        json << "\"dist\":" << sptJsonArray(dist) << ",";
+        json << "\"prev\":" << sptJsonArray(prev) << ",";
         json << "\"timeMs\":" << sptJsonDouble(result.timeMs);
         json << "}";
 
@@ -191,6 +208,8 @@ SelectiveResult handleEdgeUpdate(
         json << "\"recomputeSkipped\":true,";
         json << "\"nodesRecomputed\":0,";
         json << "\"affectedNodes\":[],";
+        json << "\"dist\":" << sptJsonArray(dist) << ",";
+        json << "\"prev\":" << sptJsonArray(prev) << ",";
         json << "\"timeMs\":" << sptJsonDouble(result.timeMs);
         json << "}";
 
@@ -323,6 +342,8 @@ SelectiveResult handleEdgeUpdate(
     json << "\"recomputeSkipped\":false,";
     json << "\"nodesRecomputed\":" << result.nodesRecomputed << ",";
     json << "\"affectedNodes\":" << result.affectedNodes << ",";
+    json << "\"dist\":" << sptJsonArray(dist) << ",";
+    json << "\"prev\":" << sptJsonArray(prev) << ",";
     json << "\"timeMs\":" << sptJsonDouble(result.timeMs);
     json << "}";
 

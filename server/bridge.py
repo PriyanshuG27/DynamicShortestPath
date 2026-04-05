@@ -114,7 +114,15 @@ class CppBridge:
         if not isinstance(event_type, str):
             return False
 
-        return event_type.endswith("_done") or event_type in {"bye", "error"}
+        terminal_events = {
+            "bye",
+            "error",
+            "edge_update",
+            "adversarial_update",
+            "adversarial",
+            "random_update",
+        }
+        return event_type.endswith("_done") or event_type in terminal_events
 
     def send(self, command_dict: Dict[str, Any], timeout: float = 10.0) -> List[Dict[str, Any]]:
         payload = json.dumps(command_dict, separators=(",", ":"))
