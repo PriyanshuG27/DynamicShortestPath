@@ -51,7 +51,7 @@ def _restart_bridge() -> None:
     bridge.restart()
 
 
-def _send_and_emit(command: Dict[str, Any]) -> Tuple[Any, int]:
+def _send_and_emit(command: Dict[str, Any], extra: Dict[str, Any] | None = None) -> Tuple[Any, int]:
     try:
         bridge = _get_bridge()
         events = bridge.send(command)
@@ -73,7 +73,11 @@ def _send_and_emit(command: Dict[str, Any]) -> Tuple[Any, int]:
     for event in events:
         socketio.emit("cpp_event", event)
 
-    return jsonify({"events": events}), 200
+    payload: Dict[str, Any] = {"events": events}
+    if isinstance(extra, dict):
+        payload.update(extra)
+
+    return jsonify(payload), 200
 
 
 def _get_json_body() -> Dict[str, Any] | None:
@@ -231,7 +235,15 @@ def api_load_osm():
         "edges": graph_payload.get("edges", []),
     }
 
-    return _send_and_emit(command)
+    return _send_and_emit(
+        command,
+        extra={
+            "graph": {
+                "nodes": graph_payload.get("nodes", 0),
+                "edges": graph_payload.get("edges", []),
+            }
+        },
+    )
 
 
 @app.get("/api/health")

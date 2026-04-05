@@ -557,7 +557,6 @@ int main() {
     bool initialized = false;
     bool hasPathState = false;
 
-    int lastSource = 0;
     double lastK = 1.0;
 
     std::vector<double> dist;
@@ -633,7 +632,6 @@ int main() {
             initialGraph = nextGraph;
             initialized = true;
             hasPathState = false;
-            lastSource = 0;
             lastK = 1.0;
 
             dist.assign(graph.nodeCount(), std::numeric_limits<double>::infinity());
@@ -661,7 +659,6 @@ int main() {
             dist = result.dist;
             prev = result.prev;
             hasPathState = true;
-            lastSource = source;
             lastK = k;
             continue;
         }
@@ -682,7 +679,6 @@ int main() {
             dist = result.dist;
             prev = result.prev;
             hasPathState = true;
-            lastSource = source;
             lastK = 0.0;
             continue;
         }
@@ -703,7 +699,6 @@ int main() {
             dist = result.dist;
             prev = result.prev;
             hasPathState = true;
-            lastSource = source;
             lastK = 0.0;
             continue;
         }
@@ -830,7 +825,6 @@ int main() {
             dist.assign(graph.nodeCount(), std::numeric_limits<double>::infinity());
             prev.assign(graph.nodeCount(), -1);
             hasPathState = false;
-            lastSource = 0;
             lastK = 1.0;
 
             emitInfo("reset_done", static_cast<int>(graph.nodeCount()), static_cast<int>(graph.edgeCount()));

@@ -31,6 +31,59 @@ const INITIAL_EDGES = [
   { a: 0, b: 5, weight: 6.2, sigma: 1.3, inSPT: false },
 ];
 
+function makeNodeLabel(id) {
+  if (id >= 0 && id < 26) {
+    return String.fromCharCode(65 + id);
+  }
+  return `N${id}`;
+}
+
+function normalizeEdgeTuple(tuple) {
+  if (!Array.isArray(tuple)) {
+    return [0, 0, 1, 0.1];
+  }
+
+  const a = Number(tuple[0]);
+  const b = Number(tuple[1]);
+  const weight = Number(tuple[2]);
+  const sigma = Number(tuple[3]);
+
+  return [
+    Number.isFinite(a) ? a : 0,
+    Number.isFinite(b) ? b : 0,
+    Number.isFinite(weight) ? weight : 1,
+    Number.isFinite(sigma) ? sigma : 0.1,
+  ];
+}
+
+function buildNodesFromCount(nodeCount, sourceId = 0) {
+  const count = Math.max(1, Math.floor(Number(nodeCount) || 1));
+  return Array.from({ length: count }, (_, id) => ({
+    id,
+    label: makeNodeLabel(id),
+    isSource: id === sourceId,
+    isTarget: id === count - 1,
+    dist: id === sourceId ? 0 : Infinity,
+  }));
+}
+
+function buildEdgesFromTuples(edgeTuples) {
+  if (!Array.isArray(edgeTuples)) {
+    return [];
+  }
+
+  return edgeTuples.map((tuple) => {
+    const [a, b, weight, sigma] = normalizeEdgeTuple(tuple);
+    return {
+      a,
+      b,
+      weight,
+      sigma,
+      inSPT: false,
+    };
+  });
+}
+
 function useSocket(onEvent) {
   useEffect(() => {
     const socket = io(API_BASE, {
@@ -140,6 +193,10 @@ export default function App() {
     standardResult: null,
     bellmanResult: null,
   });
+  const [baseGraphSpec, setBaseGraphSpec] = useState(() => ({
+    nodes: INITIAL_NODES.length,
+    edges: INITIAL_EDGES.map((e) => [e.a, e.b, e.weight, e.sigma]),
+  }));
 
   const [source, setSource] = useState(0);
   const [mode, setMode] = useState("selective");
@@ -179,6 +236,37 @@ export default function App() {
 
   const pushLog = useCallback((event) => {
     setLog((prev) => [makeLogEntry(event), ...prev].slice(0, 120));
+  }, []);
+
+  const applyGraphState = useCallback((nodeCount, edgeTuples, options = {}) => {
+    const normalizedTuples = Array.isArray(edgeTuples)
+      ? edgeTuples.map((tuple) => normalizeEdgeTuple(tuple))
+      : [];
+
+    const nextNodes = buildNodesFromCount(nodeCount, 0);
+    const nextEdges = buildEdgesFromTuples(normalizedTuples);
+
+    setSource(0);
+    setNodes(nextNodes);
+    setEdges(nextEdges);
+    setSptEdges([]);
+    setOptimalPath([]);
+    setVisitingNodes([]);
+    setFlashingEdges([]);
+    setStats({
+      nodes: nextNodes.length,
+      edges: nextEdges.length,
+      updates: 0,
+      reEvaluated: 0,
+    });
+    setAlgoResults({ dijkstraResult: null, standardResult: null, bellmanResult: null });
+
+    if (options.setAsBase === true) {
+      setBaseGraphSpec({
+        nodes: nextNodes.length,
+        edges: normalizedTuples,
+      });
+    }
   }, []);
 
   const handleSocketEvent = useCallback(
@@ -328,23 +416,11 @@ export default function App() {
   const onReset = useCallback(async () => {
     try {
       await postJson("/api/reset", {});
-      setNodes(INITIAL_NODES);
-      setEdges(INITIAL_EDGES);
-      setSptEdges([]);
-      setOptimalPath([]);
-      setVisitingNodes([]);
-      setFlashingEdges([]);
-      setStats({
-        nodes: INITIAL_NODES.length,
-        edges: INITIAL_EDGES.length,
-        updates: 0,
-        reEvaluated: 0,
-      });
-      setAlgoResults({ dijkstraResult: null, standardResult: null, bellmanResult: null });
+      applyGraphState(baseGraphSpec.nodes, baseGraphSpec.edges);
     } catch (err) {
       pushLog({ type: "err", message: err.message });
     }
-  }, [pushLog]);
+  }, [applyGraphState, baseGraphSpec, pushLog]);
 
   const onAdversarial = useCallback(async () => {
     try {
@@ -374,6 +450,112 @@ export default function App() {
       pushLog({ type: "err", message: err.message });
     }
   }, [edges, risk, pushLog]);
+
+  const onRunProbabilistic = useCallback(async () => {
+    try {
+      await postJson("/api/run", { cmd: "run_dijkstra", source, k: risk });
+    } catch (err) {
+      pushLog({ type: "err", message: err.message });
+    }
+  }, [pushLog, risk, source]);
+
+  const onRunStandard = useCallback(async () => {
+    try {
+      await postJson("/api/run", { cmd: "run_standard", source });
+    } catch (err) {
+      pushLog({ type: "err", message: err.message });
+    }
+  }, [pushLog, source]);
+
+  const onRunBellman = useCallback(async () => {
+    try {
+      await postJson("/api/run", { cmd: "run_bellman", source });
+    } catch (err) {
+      pushLog({ type: "err", message: err.message });
+    }
+  }, [pushLog, source]);
+
+  const onCustomInit = useCallback(
+    async ({ nodes: nodeCount, edges: edgeTuples }) => {
+      try {
+        await postJson("/api/run", {
+          cmd: "init",
+          nodes: nodeCount,
+          edges: edgeTuples,
+        });
+        applyGraphState(nodeCount, edgeTuples, { setAsBase: true });
+        pushLog({
+          type: "ui",
+          message: `custom_init nodes=${nodeCount} edges=${Array.isArray(edgeTuples) ? edgeTuples.length : 0}`,
+        });
+      } catch (err) {
+        pushLog({ type: "err", message: err.message });
+      }
+    },
+    [applyGraphState, pushLog]
+  );
+
+  const onManualUpdate = useCallback(
+    async ({ edgeIdx, weight, sigma }) => {
+      try {
+        await postJson("/api/update", {
+          edgeIdx,
+          weight,
+          sigma,
+          mode: "selective",
+          k: risk,
+        });
+      } catch (err) {
+        pushLog({ type: "err", message: err.message });
+      }
+    },
+    [pushLog, risk]
+  );
+
+  const onManualBatch = useCallback(
+    async ({ updates }) => {
+      try {
+        await postJson("/api/batch", { updates, k: risk });
+      } catch (err) {
+        pushLog({ type: "err", message: err.message });
+      }
+    },
+    [pushLog, risk]
+  );
+
+  const onLoadOsm = useCallback(
+    async ({ maxNodes, rebuild }) => {
+      try {
+        const data = await postJson("/api/load_osm", {
+          max_nodes: maxNodes,
+          rebuild,
+        });
+
+        const graph = data?.graph;
+        if (
+          graph &&
+          Number.isFinite(Number(graph.nodes)) &&
+          Array.isArray(graph.edges)
+        ) {
+          applyGraphState(Number(graph.nodes), graph.edges, { setAsBase: true });
+          pushLog({
+            type: "ui",
+            message: `osm_graph_loaded nodes=${graph.nodes} edges=${graph.edges.length}`,
+          });
+        }
+      } catch (err) {
+        pushLog({ type: "err", message: err.message });
+      }
+    },
+    [applyGraphState, pushLog]
+  );
+
+  const onNotice = useCallback(
+    (type, message) => {
+      pushLog({ type: type || "ui", message });
+    },
+    [pushLog]
+  );
 
   const toggleUncertainty = useCallback(() => {
     setShowUncertainty((v) => !v);
@@ -420,18 +602,28 @@ export default function App() {
 
       <Controls
         onRun={onRun}
+        onRunProbabilistic={onRunProbabilistic}
+        onRunStandard={onRunStandard}
+        onRunBellman={onRunBellman}
         onReset={onReset}
         onAdversarial={onAdversarial}
         onRandom={onRandom}
         onBatch={onBatch}
+        onCustomInit={onCustomInit}
+        onManualUpdate={onManualUpdate}
+        onManualBatch={onManualBatch}
+        onLoadOsm={onLoadOsm}
+        onNotice={onNotice}
         onToggleUncertainty={toggleUncertainty}
         onModeChange={setMode}
         onSourceChange={setSource}
         onRiskChange={setRisk}
         onSpeedChange={setSpeed}
         nodes={nodes}
+        edges={edges}
         source={source}
         mode={modeValue}
+        risk={risk}
         showUncertainty={showUncertainty}
       />
     </div>
