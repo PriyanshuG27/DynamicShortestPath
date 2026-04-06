@@ -26,6 +26,9 @@ client/dist/
 # Logs and generated experiment output
 *.log
 data/results.json
+data/custom_graph.json
+data/noida_graph.json
+server/cache/
 
 # OS/editor noise
 .DS_Store

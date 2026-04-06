@@ -30,6 +30,7 @@ export default function SidePanel({
   bellmanResult,
   stats,
   log,
+  traffic,
 }) {
   const rows = useMemo(
     () => [
@@ -41,6 +42,13 @@ export default function SidePanel({
   );
 
   const maxRelax = Math.max(1, ...rows.map((r) => r.value));
+
+  const trafficBadge =
+    traffic?.level === "high"
+      ? "🔴 High"
+      : traffic?.level === "medium"
+        ? "🟡 Medium"
+        : "🟢 Low";
 
   return (
     <aside className="side-panel">
@@ -87,6 +95,31 @@ export default function SidePanel({
             <div className="stat-label">re-evaluated</div>
             <div className="stat-value">{stats.reEvaluated}</div>
           </div>
+        </div>
+      </div>
+
+      <div className="panel-section">
+        <h3>Traffic</h3>
+        <div className="stats-grid">
+          <div className="stat-card">
+            <div className="stat-label">level</div>
+            <div className="stat-value stat-value-traffic">{trafficBadge}</div>
+          </div>
+          <div className="stat-card">
+            <div className="stat-label">avg weight</div>
+            <div className="stat-value">{Number(traffic?.avgEdgeWeight || 0).toFixed(2)}</div>
+          </div>
+          <div className="stat-card">
+            <div className="stat-label">cycles</div>
+            <div className="stat-value">{traffic?.cycles || 0}</div>
+          </div>
+          <div className="stat-card">
+            <div className="stat-label">spt changes</div>
+            <div className="stat-value">{traffic?.sptChanges || 0}</div>
+          </div>
+        </div>
+        <div className="traffic-note">
+          Active edge deltas: {traffic?.activeDeltas || 0} {traffic?.enabled ? "(live)" : "(paused)"}
         </div>
       </div>
 

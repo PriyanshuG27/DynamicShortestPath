@@ -3,8 +3,15 @@ import { io } from "socket.io-client";
 import GraphCanvas from "./GraphCanvas";
 import Controls from "./Controls";
 import SidePanel from "./SidePanel";
+import MapOnboarding from "./MapOnboarding";
+import MapEditor from "./MapEditor";
 
-const API_BASE = "http://127.0.0.1:5000";
+const API_BASE = "";
+const SOCKET_BASE = typeof window !== "undefined" ? window.location.origin : "http://127.0.0.1:5000";
+const PANEL_STATE_KEY = "dsp_panel_state_v1";
+const MAP_ONBOARDING_KEY = "dsp_map_intro_seen_v1";
+const EDGE_DELTA_TTL_MS = 8000;
+const DEFAULT_TRAFFIC_INTERVAL_MS = 2500;
 
 const INITIAL_NODES = [
   { id: 0, label: "A", isSource: true, dist: 0 },
@@ -86,7 +93,8 @@ function buildEdgesFromTuples(edgeTuples) {
 
 function useSocket(onEvent) {
   useEffect(() => {
-    const socket = io(API_BASE, {
+    const socket = io(SOCKET_BASE, {
+      path: "/socket.io",
       transports: ["websocket", "polling"],
     });
 
@@ -153,6 +161,40 @@ function makeLogEntry(event) {
   };
 }
 
+function readPanelState() {
+  if (typeof window === "undefined") {
+    return {
+      showLeftPanel: true,
+      showRightPanel: true,
+      showBottomPanel: true,
+    };
+  }
+
+  try {
+    const raw = window.sessionStorage.getItem(PANEL_STATE_KEY);
+    if (!raw) {
+      return {
+        showLeftPanel: true,
+        showRightPanel: true,
+        showBottomPanel: true,
+      };
+    }
+
+    const parsed = JSON.parse(raw);
+    return {
+      showLeftPanel: parsed?.showLeftPanel !== false,
+      showRightPanel: parsed?.showRightPanel !== false,
+      showBottomPanel: parsed?.showBottomPanel !== false,
+    };
+  } catch {
+    return {
+      showLeftPanel: true,
+      showRightPanel: true,
+      showBottomPanel: true,
+    };
+  }
+}
+
 async function postJson(path, payload) {
   const response = await fetch(`${API_BASE}${path}`, {
     method: "POST",
@@ -203,13 +245,78 @@ export default function App() {
   const [showUncertainty, setShowUncertainty] = useState(true);
   const [risk, setRisk] = useState(1.0);
   const [speed, setSpeed] = useState(3);
+  const [showLeftPanel, setShowLeftPanel] = useState(() => readPanelState().showLeftPanel);
+  const [showRightPanel, setShowRightPanel] = useState(() => readPanelState().showRightPanel);
+  const [showBottomPanel, setShowBottomPanel] = useState(() => readPanelState().showBottomPanel);
+  const [trafficMode, setTrafficMode] = useState(false);
+  const [trafficIntervalMs, setTrafficIntervalMs] = useState(DEFAULT_TRAFFIC_INTERVAL_MS);
+  const [trafficCycles, setTrafficCycles] = useState(0);
+  const [trafficSptChanges, setTrafficSptChanges] = useState(0);
+  const [mapMaxNodes, setMapMaxNodes] = useState(50);
+  const [mapRebuild, setMapRebuild] = useState(false);
+  const [mapLoading, setMapLoading] = useState(false);
+  const [showMapOnboarding, setShowMapOnboarding] = useState(false);
+  const [showMapEditor, setShowMapEditor] = useState(false);
+  const [edgeDeltas, setEdgeDeltas] = useState({});
+  const [pulsingEdges, setPulsingEdges] = useState([]);
 
   const canvasRef = useRef(null);
   const speedRef = useRef(speed);
+  const riskRef = useRef(risk);
+  const edgesRef = useRef(edges);
+  const optimalPathKeyRef = useRef("");
+  const edgeDeltaTimersRef = useRef({});
+  const pulseTimerRef = useRef(null);
 
   useEffect(() => {
     speedRef.current = speed;
   }, [speed]);
+
+  useEffect(() => {
+    riskRef.current = risk;
+  }, [risk]);
+
+  useEffect(() => {
+    edgesRef.current = edges;
+  }, [edges]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    window.sessionStorage.setItem(
+      PANEL_STATE_KEY,
+      JSON.stringify({
+        showLeftPanel,
+        showRightPanel,
+        showBottomPanel,
+      })
+    );
+  }, [showBottomPanel, showLeftPanel, showRightPanel]);
+
+  useEffect(() => {
+    if (typeof window === "undefined") {
+      return;
+    }
+
+    const seen = window.localStorage.getItem(MAP_ONBOARDING_KEY);
+    if (!seen) {
+      setShowMapOnboarding(true);
+    }
+  }, []);
+
+  useEffect(
+    () => () => {
+      Object.values(edgeDeltaTimersRef.current).forEach((timer) => {
+        window.clearTimeout(timer);
+      });
+      if (pulseTimerRef.current) {
+        window.clearTimeout(pulseTimerRef.current);
+      }
+    },
+    []
+  );
 
   const applyDistances = useCallback((dist) => {
     setNodes((prevNodes) =>
@@ -220,7 +327,12 @@ export default function App() {
     );
   }, []);
 
-  const updateEdgeValues = useCallback((edgeIdx, newWeight, newSigma) => {
+  const updateEdgeValues = useCallback((edgeIdx, newWeight, newSigma, reason = "update") => {
+    const prevEdge = edgesRef.current?.[edgeIdx];
+    const oldWeight = typeof prevEdge?.weight === "number" ? prevEdge.weight : null;
+    const resolvedWeight =
+      typeof newWeight === "number" ? newWeight : typeof oldWeight === "number" ? oldWeight : null;
+
     setEdges((prevEdges) =>
       prevEdges.map((e, idx) =>
         idx === edgeIdx
@@ -232,6 +344,56 @@ export default function App() {
           : e
       )
     );
+
+    if (
+      Number.isFinite(oldWeight) &&
+      Number.isFinite(resolvedWeight) &&
+      Math.abs(resolvedWeight - oldWeight) > 1e-9
+    ) {
+      const pct =
+        Math.abs(oldWeight) > 1e-9 ? ((resolvedWeight - oldWeight) / Math.abs(oldWeight)) * 100 : null;
+
+      setEdgeDeltas((prev) => ({
+        ...prev,
+        [edgeIdx]: {
+          from: oldWeight,
+          to: resolvedWeight,
+          pct,
+          reason,
+          changedAt: Date.now(),
+        },
+      }));
+
+      const previousTimer = edgeDeltaTimersRef.current[edgeIdx];
+      if (previousTimer) {
+        window.clearTimeout(previousTimer);
+      }
+
+      edgeDeltaTimersRef.current[edgeIdx] = window.setTimeout(() => {
+        setEdgeDeltas((prev) => {
+          if (!(edgeIdx in prev)) {
+            return prev;
+          }
+          const next = { ...prev };
+          delete next[edgeIdx];
+          return next;
+        });
+        delete edgeDeltaTimersRef.current[edgeIdx];
+      }, EDGE_DELTA_TTL_MS);
+    }
+  }, []);
+
+  const pulseEdge = useCallback((edgeIdx, ttl = 360) => {
+    if (!Number.isFinite(edgeIdx)) {
+      return;
+    }
+    setPulsingEdges([edgeIdx]);
+    if (pulseTimerRef.current) {
+      window.clearTimeout(pulseTimerRef.current);
+    }
+    pulseTimerRef.current = window.setTimeout(() => {
+      setPulsingEdges([]);
+    }, ttl);
   }, []);
 
   const pushLog = useCallback((event) => {
@@ -251,8 +413,13 @@ export default function App() {
     setEdges(nextEdges);
     setSptEdges([]);
     setOptimalPath([]);
+    optimalPathKeyRef.current = "";
     setVisitingNodes([]);
     setFlashingEdges([]);
+    setPulsingEdges([]);
+    setEdgeDeltas({});
+    setTrafficCycles(0);
+    setTrafficSptChanges(0);
     setStats({
       nodes: nextNodes.length,
       edges: nextEdges.length,
@@ -267,6 +434,7 @@ export default function App() {
         edges: normalizedTuples,
       });
     }
+    edgesRef.current = nextEdges;
   }, []);
 
   const handleSocketEvent = useCallback(
@@ -291,7 +459,14 @@ export default function App() {
         setSource(sourceId);
 
         const target = chooseTarget(dist, sourceId);
-        setOptimalPath(buildPath(prev, sourceId, target));
+        const nextPath = buildPath(prev, sourceId, target);
+        setOptimalPath(nextPath);
+
+        const nextPathKey = nextPath.join(">");
+        if (trafficMode && optimalPathKeyRef.current && nextPathKey !== optimalPathKeyRef.current) {
+          setTrafficSptChanges((count) => count + 1);
+        }
+        optimalPathKeyRef.current = nextPathKey;
 
         const nextSpt = safeArray(event.sptEdges).map((x) => Number(x));
         if (eventType !== "bellman_done") {
@@ -318,7 +493,8 @@ export default function App() {
       if (eventType === "edge_update") {
         const edgeIdx = Number(event.edgeIdx);
         if (Number.isFinite(edgeIdx)) {
-          updateEdgeValues(edgeIdx, event.newWeight, event.newSigma);
+          updateEdgeValues(edgeIdx, event.newWeight, event.newSigma, "edge_update");
+          pulseEdge(edgeIdx);
         }
 
         const updatedDist = safeArray(event.dist);
@@ -328,7 +504,14 @@ export default function App() {
         if (updatedDist.length > 0) {
           applyDistances(updatedDist);
           const target = chooseTarget(updatedDist, sourceId);
-          setOptimalPath(buildPath(updatedPrev, sourceId, target));
+          const nextPath = buildPath(updatedPrev, sourceId, target);
+          setOptimalPath(nextPath);
+
+          const nextPathKey = nextPath.join(">");
+          if (trafficMode && optimalPathKeyRef.current && nextPathKey !== optimalPathKeyRef.current) {
+            setTrafficSptChanges((count) => count + 1);
+          }
+          optimalPathKeyRef.current = nextPathKey;
         }
 
         const affected = safeArray(event.affectedNodes).map((x) => Number(x));
@@ -357,8 +540,9 @@ export default function App() {
         const edgeIdx = Number(event.edgeIdx);
         if (Number.isFinite(edgeIdx)) {
           setFlashingEdges([edgeIdx]);
+          pulseEdge(edgeIdx, 460);
           window.setTimeout(() => {
-            updateEdgeValues(edgeIdx, event.newWeight, null);
+            updateEdgeValues(edgeIdx, event.newWeight, null, "adversarial_update");
             setFlashingEdges([]);
           }, 260);
         }
@@ -368,7 +552,8 @@ export default function App() {
       if (eventType === "random_update") {
         const edgeIdx = Number(event.edgeIdx);
         if (Number.isFinite(edgeIdx)) {
-          updateEdgeValues(edgeIdx, event.newWeight, event.newSigma);
+          updateEdgeValues(edgeIdx, event.newWeight, event.newSigma, "random_update");
+          pulseEdge(edgeIdx);
         }
         setStats((s) => ({ ...s, updates: s.updates + 1 }));
       }
@@ -381,7 +566,15 @@ export default function App() {
         }));
       }
     },
-    [applyDistances, pushLog, risk, source, updateEdgeValues]
+    [
+      applyDistances,
+      pulseEdge,
+      pushLog,
+      risk,
+      source,
+      trafficMode,
+      updateEdgeValues,
+    ]
   );
 
   useSocket(handleSocketEvent);
@@ -422,13 +615,27 @@ export default function App() {
     }
   }, [applyGraphState, baseGraphSpec, pushLog]);
 
+  const sendAdversarial = useCallback(
+    async (riskValue, origin = "manual") => {
+      try {
+        await postJson("/api/adversarial", { k: riskValue });
+        if (origin === "traffic") {
+          setTrafficCycles((count) => count + 1);
+        }
+      } catch (err) {
+        pushLog({ type: "err", message: err.message });
+      }
+    },
+    [pushLog]
+  );
+
   const onAdversarial = useCallback(async () => {
     try {
-      await postJson("/api/adversarial", { k: risk });
+      await sendAdversarial(risk, "manual");
     } catch (err) {
       pushLog({ type: "err", message: err.message });
     }
-  }, [risk, pushLog]);
+  }, [risk, pushLog, sendAdversarial]);
 
   const onRandom = useCallback(async () => {
     try {
@@ -526,6 +733,7 @@ export default function App() {
   const onLoadOsm = useCallback(
     async ({ maxNodes, rebuild }) => {
       try {
+        setMapLoading(true);
         const data = await postJson("/api/load_osm", {
           max_nodes: maxNodes,
           rebuild,
@@ -545,10 +753,90 @@ export default function App() {
         }
       } catch (err) {
         pushLog({ type: "err", message: err.message });
+      } finally {
+        setMapLoading(false);
       }
     },
     [applyGraphState, pushLog]
   );
+
+  const onUseDemoGraph = useCallback(async () => {
+    try {
+      const edgeTuples = INITIAL_EDGES.map((e) => [e.a, e.b, e.weight, e.sigma]);
+      await postJson("/api/run", {
+        cmd: "init",
+        nodes: INITIAL_NODES.length,
+        edges: edgeTuples,
+      });
+      applyGraphState(INITIAL_NODES.length, edgeTuples, { setAsBase: true });
+      pushLog({ type: "ui", message: "demo_graph_loaded" });
+    } catch (err) {
+      pushLog({ type: "err", message: err.message });
+    }
+  }, [applyGraphState, pushLog]);
+
+  const onApplyMapEditor = useCallback(
+    async ({ nodes: nodeCount, edges: edgeTuples, persist }) => {
+      try {
+        if (persist) {
+          await postJson("/api/save_graph", {
+            nodes: nodeCount,
+            edges: edgeTuples,
+          });
+        }
+
+        await postJson("/api/run", {
+          cmd: "init",
+          nodes: nodeCount,
+          edges: edgeTuples,
+        });
+
+        applyGraphState(nodeCount, edgeTuples, { setAsBase: true });
+        setShowMapEditor(false);
+        pushLog({
+          type: "ui",
+          message: `map_editor_applied nodes=${nodeCount} edges=${edgeTuples.length}${persist ? " saved" : ""}`,
+        });
+      } catch (err) {
+        pushLog({ type: "err", message: err.message });
+      }
+    },
+    [applyGraphState, pushLog]
+  );
+
+  const markOnboardingSeen = useCallback(() => {
+    if (typeof window !== "undefined") {
+      window.localStorage.setItem(MAP_ONBOARDING_KEY, "1");
+    }
+  }, []);
+
+  const onOnboardingLoadMap = useCallback(async () => {
+    markOnboardingSeen();
+    setShowMapOnboarding(false);
+    await onLoadOsm({ maxNodes: mapMaxNodes, rebuild: true });
+  }, [mapMaxNodes, markOnboardingSeen, onLoadOsm]);
+
+  const onOnboardingSkip = useCallback(() => {
+    markOnboardingSeen();
+    setShowMapOnboarding(false);
+  }, [markOnboardingSeen]);
+
+  useEffect(() => {
+    if (!trafficMode) {
+      return undefined;
+    }
+
+    const timer = window.setInterval(() => {
+      const nextRisk = Math.min(3, Number((riskRef.current + 0.05).toFixed(2)));
+      setRisk(nextRisk);
+      riskRef.current = nextRisk;
+      sendAdversarial(nextRisk, "traffic");
+    }, Math.max(1200, Number(trafficIntervalMs) || DEFAULT_TRAFFIC_INTERVAL_MS));
+
+    return () => {
+      window.clearInterval(timer);
+    };
+  }, [sendAdversarial, trafficIntervalMs, trafficMode]);
 
   const onNotice = useCallback(
     (type, message) => {
@@ -561,16 +849,122 @@ export default function App() {
     setShowUncertainty((v) => !v);
   }, []);
 
+  const avgEdgeWeight = useMemo(() => {
+    if (!Array.isArray(edges) || edges.length === 0) {
+      return 0;
+    }
+    const total = edges.reduce((sum, edge) => sum + (Number(edge.weight) || 0), 0);
+    return total / edges.length;
+  }, [edges]);
+
+  const trafficLevel = useMemo(() => {
+    if (avgEdgeWeight < 2.5) {
+      return "low";
+    }
+    if (avgEdgeWeight < 4.5) {
+      return "medium";
+    }
+    return "high";
+  }, [avgEdgeWeight]);
+
   const modeValue = useMemo(() => mode, [mode]);
 
   return (
     <div className="app-shell">
       <header className="topbar">
-        <h1>Dynamic Shortest Path Analysis</h1>
-        <div className="meta">Probabilistic graph updates with adversarial controls</div>
+        <div className="topbar-row">
+          <div>
+            <h1>Dynamic Shortest Path Analysis</h1>
+            <div className="meta">Probabilistic graph updates with adversarial controls</div>
+          </div>
+
+          <div className="panel-toggles">
+            <label className="top-toggle">
+              <input
+                type="checkbox"
+                checked={showLeftPanel}
+                onChange={(event) => setShowLeftPanel(event.target.checked)}
+              />
+              Left panel
+            </label>
+            <label className="top-toggle">
+              <input
+                type="checkbox"
+                checked={showRightPanel}
+                onChange={(event) => setShowRightPanel(event.target.checked)}
+              />
+              Right panel
+            </label>
+            <label className="top-toggle">
+              <input
+                type="checkbox"
+                checked={showBottomPanel}
+                onChange={(event) => setShowBottomPanel(event.target.checked)}
+              />
+              Bottom controls
+            </label>
+          </div>
+        </div>
       </header>
 
-      <main className="main-grid">
+      <main
+        className="main-grid"
+        style={{
+          "--left-panel-width": showLeftPanel ? "280px" : "0px",
+          "--right-panel-width": showRightPanel ? "380px" : "0px",
+        }}
+      >
+        {showLeftPanel ? (
+          <aside className="left-panel">
+            <div className="panel-section">
+              <h3>Graph Source</h3>
+              <div className="left-control-group">
+                <label htmlFor="left-map-max" className="left-control-label">
+                  Max Nodes
+                </label>
+                <input
+                  id="left-map-max"
+                  type="range"
+                  min="10"
+                  max="200"
+                  step="5"
+                  value={mapMaxNodes}
+                  onChange={(event) => setMapMaxNodes(Number(event.target.value))}
+                />
+                <div className="left-control-value">{mapMaxNodes}</div>
+              </div>
+
+              <label className="lab-check left-check">
+                <input
+                  type="checkbox"
+                  checked={mapRebuild}
+                  onChange={(event) => setMapRebuild(event.target.checked)}
+                />
+                Rebuild map cache
+              </label>
+
+              <div className="left-button-row">
+                <button className="ctl-btn" disabled={mapLoading} onClick={() => onLoadOsm({ maxNodes: mapMaxNodes, rebuild: mapRebuild })}>
+                  {mapLoading ? "Loading map..." : "Load from map"}
+                </button>
+                <button className="ctl-btn" onClick={onUseDemoGraph}>
+                  Use demo graph
+                </button>
+                <button className="ctl-btn" onClick={() => setShowMapEditor(true)}>
+                  Open map editor
+                </button>
+              </div>
+            </div>
+
+            <div className="panel-section">
+              <h3>Traffic Simulation</h3>
+              <div className="left-kv">Mode: {trafficMode ? "active" : "paused"}</div>
+              <div className="left-kv">Cycles: {trafficCycles}</div>
+              <div className="left-kv">SPT changes: {trafficSptChanges}</div>
+            </div>
+          </aside>
+        ) : null}
+
         <section className="canvas-panel">
           <GraphCanvas
             ref={canvasRef}
@@ -580,7 +974,9 @@ export default function App() {
             visitingNodes={visitingNodes}
             optimalPath={optimalPath}
             flashingEdges={flashingEdges}
+            pulsingEdges={pulsingEdges}
             showUncertainty={showUncertainty}
+            edgeDeltas={edgeDeltas}
             onNodeClick={(node) =>
               pushLog({
                 type: "hover",
@@ -591,40 +987,76 @@ export default function App() {
           />
         </section>
 
-        <SidePanel
-          dijkstraResult={algoResults.dijkstraResult}
-          standardResult={algoResults.standardResult}
-          bellmanResult={algoResults.bellmanResult}
-          stats={stats}
-          log={log}
-        />
+        {showRightPanel ? (
+          <SidePanel
+            dijkstraResult={algoResults.dijkstraResult}
+            standardResult={algoResults.standardResult}
+            bellmanResult={algoResults.bellmanResult}
+            stats={stats}
+            log={log}
+            traffic={{
+              enabled: trafficMode,
+              level: trafficLevel,
+              avgEdgeWeight,
+              cycles: trafficCycles,
+              sptChanges: trafficSptChanges,
+              activeDeltas: Object.keys(edgeDeltas).length,
+            }}
+          />
+        ) : null}
       </main>
 
-      <Controls
-        onRun={onRun}
-        onRunProbabilistic={onRunProbabilistic}
-        onRunStandard={onRunStandard}
-        onRunBellman={onRunBellman}
-        onReset={onReset}
-        onAdversarial={onAdversarial}
-        onRandom={onRandom}
-        onBatch={onBatch}
-        onCustomInit={onCustomInit}
-        onManualUpdate={onManualUpdate}
-        onManualBatch={onManualBatch}
-        onLoadOsm={onLoadOsm}
-        onNotice={onNotice}
-        onToggleUncertainty={toggleUncertainty}
-        onModeChange={setMode}
-        onSourceChange={setSource}
-        onRiskChange={setRisk}
-        onSpeedChange={setSpeed}
-        nodes={nodes}
-        edges={edges}
-        source={source}
-        mode={modeValue}
-        risk={risk}
-        showUncertainty={showUncertainty}
+      {showBottomPanel ? (
+        <Controls
+          onRun={onRun}
+          onRunProbabilistic={onRunProbabilistic}
+          onRunStandard={onRunStandard}
+          onRunBellman={onRunBellman}
+          onReset={onReset}
+          onAdversarial={onAdversarial}
+          onRandom={onRandom}
+          onBatch={onBatch}
+          onCustomInit={onCustomInit}
+          onManualUpdate={onManualUpdate}
+          onManualBatch={onManualBatch}
+          onLoadOsm={onLoadOsm}
+          onNotice={onNotice}
+          onToggleUncertainty={toggleUncertainty}
+          onModeChange={setMode}
+          onSourceChange={setSource}
+          onRiskChange={setRisk}
+          onSpeedChange={setSpeed}
+          onTrafficModeChange={setTrafficMode}
+          onTrafficIntervalChange={setTrafficIntervalMs}
+          nodes={nodes}
+          edges={edges}
+          source={source}
+          mode={modeValue}
+          risk={risk}
+          speed={speed}
+          trafficMode={trafficMode}
+          trafficIntervalMs={trafficIntervalMs}
+          showUncertainty={showUncertainty}
+        />
+      ) : null}
+
+      <MapOnboarding
+        open={showMapOnboarding}
+        maxNodes={mapMaxNodes}
+        onMaxNodesChange={setMapMaxNodes}
+        onLoadMap={onOnboardingLoadMap}
+        onSkip={onOnboardingSkip}
+        onOpenEditor={() => {
+          markOnboardingSeen();
+          setShowMapOnboarding(false);
+          setShowMapEditor(true);
+        }}
+      />
+
+      <MapEditor
+        open={showMapEditor}
+        onClose={() => setShowMapEditor(false)}
+        onApply={onApplyMapEditor}
       />
     </div>
   );

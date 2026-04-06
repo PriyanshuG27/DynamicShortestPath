@@ -1,4 +1,5 @@
 import os
+import json
 import threading
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple
@@ -16,15 +17,37 @@ except ImportError:
 PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DEFAULT_BINARY = str(PROJECT_ROOT / "main.exe")
 CPP_BINARY_PATH = os.environ.get("CPP_BINARY_PATH", DEFAULT_BINARY)
+CUSTOM_GRAPH_PATH = PROJECT_ROOT / "data" / "custom_graph.json"
 
 app = Flask(__name__)
 app.config["JSON_SORT_KEYS"] = False
 
-CORS(app, resources={r"/api/*": {"origins": ["http://localhost:3000"]}})
-socketio = SocketIO(app, cors_allowed_origins=["http://localhost:3000"])
+CORS(app)
+socketio = SocketIO(app, cors_allowed_origins="*")
 
 _bridge: Optional[CppBridge] = None
 _bridge_lock = threading.Lock()
+
+
+@app.before_request
+def _handle_preflight():
+    if request.method == "OPTIONS":
+        return "", 204
+    return None
+
+
+@app.after_request
+def _add_cors_headers(response):
+    origin = request.headers.get("Origin")
+    if origin:
+        response.headers["Access-Control-Allow-Origin"] = origin
+        response.headers["Vary"] = "Origin"
+    else:
+        response.headers.setdefault("Access-Control-Allow-Origin", "*")
+
+    response.headers.setdefault("Access-Control-Allow-Headers", "Content-Type, Authorization")
+    response.headers.setdefault("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
+    return response
 
 
 def _build_error_response(message: str, status: int = 400, restarted: bool = False):
@@ -244,6 +267,74 @@ def api_load_osm():
             }
         },
     )
+
+
+@app.post("/api/save_graph")
+def api_save_graph():
+    payload = _get_json_body()
+    if payload is None:
+        return _build_error_response("invalid_request: expected JSON object")
+
+    nodes = payload.get("nodes")
+    edges = payload.get("edges")
+
+    if not isinstance(nodes, int) or isinstance(nodes, bool) or nodes < 1:
+        return _build_error_response("invalid_request: nodes must be a positive integer")
+
+    if not isinstance(edges, list) or len(edges) == 0:
+        return _build_error_response("invalid_request: edges must be a non-empty list")
+
+    normalized_edges = []
+    for index, edge in enumerate(edges):
+        if not isinstance(edge, list) or len(edge) < 4:
+            return _build_error_response(
+                f"invalid_request: edge[{index}] must be [a,b,weight,sigma]"
+            )
+
+        a, b, weight, sigma = edge[:4]
+        if not all(isinstance(v, (int, float)) and not isinstance(v, bool) for v in (a, b, weight, sigma)):
+            return _build_error_response(
+                f"invalid_request: edge[{index}] values must be numeric"
+            )
+
+        a_i = int(a)
+        b_i = int(b)
+        if a_i < 0 or b_i < 0 or a_i >= nodes or b_i >= nodes:
+            return _build_error_response(
+                f"invalid_request: edge[{index}] nodes must be in [0, {nodes - 1}]"
+            )
+
+        normalized_edges.append([a_i, b_i, float(weight), float(sigma)])
+
+    graph_payload = {
+        "cmd": "init",
+        "nodes": nodes,
+        "edges": normalized_edges,
+    }
+
+    CUSTOM_GRAPH_PATH.parent.mkdir(parents=True, exist_ok=True)
+    CUSTOM_GRAPH_PATH.write_text(
+        json.dumps(graph_payload, ensure_ascii=True),
+        encoding="utf-8",
+    )
+
+    socketio.emit(
+        "cpp_event",
+        {
+            "type": "graph_saved",
+            "path": str(CUSTOM_GRAPH_PATH),
+            "nodes": nodes,
+            "edges": len(normalized_edges),
+        },
+    )
+
+    return jsonify(
+        {
+            "type": "graph_saved",
+            "path": str(CUSTOM_GRAPH_PATH),
+            "graph": graph_payload,
+        }
+    ), 200
 
 
 @app.get("/api/health")

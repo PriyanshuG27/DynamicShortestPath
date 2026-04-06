@@ -29,11 +29,16 @@ export default function Controls({
   onSourceChange,
   onRiskChange,
   onSpeedChange,
+  onTrafficModeChange,
+  onTrafficIntervalChange,
   nodes,
   edges,
   source,
   mode,
   risk,
+  speed,
+  trafficMode,
+  trafficIntervalMs,
   showUncertainty,
 }) {
   const [customNodeCount, setCustomNodeCount] = useState(nodes.length || 1);
@@ -285,7 +290,7 @@ export default function Controls({
             min="0"
             max="3"
             step="0.1"
-            defaultValue="1"
+            value={risk}
             onChange={(e) => onRiskChange(Number(e.target.value))}
           />
           <div className="slider-value">Current: {Number(risk).toFixed(1)}</div>
@@ -299,9 +304,33 @@ export default function Controls({
             min="1"
             max="5"
             step="1"
-            defaultValue="3"
+            value={speed}
             onChange={(e) => onSpeedChange(Number(e.target.value))}
           />
+          <div className="slider-value">Current: {Number(speed).toFixed(0)}</div>
+        </div>
+
+        <div className="slider-wrap">
+          <label className="lab-check" htmlFor="traffic-toggle">
+            <input
+              id="traffic-toggle"
+              type="checkbox"
+              checked={trafficMode}
+              onChange={(e) => onTrafficModeChange(e.target.checked)}
+            />
+            Simulate Traffic Mode
+          </label>
+          <label htmlFor="traffic-interval">Traffic Interval (ms)</label>
+          <input
+            id="traffic-interval"
+            type="range"
+            min="1200"
+            max="6000"
+            step="200"
+            value={trafficIntervalMs}
+            onChange={(e) => onTrafficIntervalChange(Number(e.target.value))}
+          />
+          <div className="slider-value">Cycle: {trafficIntervalMs} ms</div>
         </div>
       </div>
 

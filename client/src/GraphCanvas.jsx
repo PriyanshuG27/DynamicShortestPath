@@ -5,6 +5,7 @@ import React, {
   useImperativeHandle,
   useMemo,
   useRef,
+  useState,
 } from "react";
 import {
   forceCenter,
@@ -31,6 +32,36 @@ const NODE_RADIUS = 18;
 const HOVER_RADIUS = 22;
 const RIPPLE_MS = 400;
 
+function getEdgeColor(weight, maxWeight) {
+  const safeMax = Math.max(0.1, Number(maxWeight) || 1);
+  const ratio = Math.max(0, Math.min(1, (Number(weight) || 0) / safeMax));
+
+  if (ratio < 0.25) {
+    return "#22c55e";
+  }
+  if (ratio < 0.5) {
+    return "#facc15";
+  }
+  if (ratio < 0.75) {
+    return "#fb923c";
+  }
+  return "#ef4444";
+}
+
+function distanceToSegment(px, py, x1, y1, x2, y2) {
+  const dx = x2 - x1;
+  const dy = y2 - y1;
+
+  if (Math.abs(dx) < 1e-9 && Math.abs(dy) < 1e-9) {
+    return Math.hypot(px - x1, py - y1);
+  }
+
+  const t = Math.max(0, Math.min(1, ((px - x1) * dx + (py - y1) * dy) / (dx * dx + dy * dy)));
+  const projX = x1 + t * dx;
+  const projY = y1 + t * dy;
+  return Math.hypot(px - projX, py - projY);
+}
+
 function edgeEndpoints(edge) {
   const a = typeof edge.a === "number" ? edge.a : edge.source?.id ?? edge.source;
   const b = typeof edge.b === "number" ? edge.b : edge.target?.id ?? edge.target;
@@ -53,6 +84,13 @@ function nodeLabel(node) {
     return String.fromCharCode(65 + id);
   }
   return String(node.id ?? "?");
+}
+
+function idLabel(id) {
+  if (Number.isFinite(id) && id >= 0 && id < 26) {
+    return String.fromCharCode(65 + id);
+  }
+  return `N${id}`;
 }
 
 function nodeDistanceLabel(node) {
@@ -111,7 +149,9 @@ const GraphCanvas = forwardRef(function GraphCanvas(
     visitingNodes = [],
     optimalPath = [],
     flashingEdges = [],
+    pulsingEdges = [],
     showUncertainty = false,
+    edgeDeltas = {},
     onNodeClick,
   },
   ref
@@ -123,6 +163,7 @@ const GraphCanvas = forwardRef(function GraphCanvas(
   const ripplesRef = useRef([]);
   const visitingPrevRef = useRef(new Set());
   const hoverNodeIdRef = useRef(null);
+  const [hoveredEdge, setHoveredEdge] = useState(null);
 
   const visitingSet = useMemo(() => new Set(visitingNodes), [visitingNodes]);
 
@@ -131,6 +172,8 @@ const GraphCanvas = forwardRef(function GraphCanvas(
   const optimalNodeSet = useMemo(() => new Set(optimalPath), [optimalPath]);
 
   const flashingEdgeSet = useMemo(() => new Set(flashingEdges), [flashingEdges]);
+
+  const pulsingEdgeSet = useMemo(() => new Set(pulsingEdges), [pulsingEdges]);
 
   const optimalEdgeKeys = useMemo(() => {
     const keys = new Set();
@@ -286,13 +329,67 @@ const GraphCanvas = forwardRef(function GraphCanvas(
           onNodeClick(closest);
         }
       }
+
+      let nearestEdge = null;
+      let nearestDistance = 12;
+      for (const edge of graphRef.current.links) {
+        const sx = edge.source?.x;
+        const sy = edge.source?.y;
+        const tx = edge.target?.x;
+        const ty = edge.target?.y;
+        if (![sx, sy, tx, ty].every(Number.isFinite)) {
+          continue;
+        }
+
+        const distance = distanceToSegment(x, y, sx, sy, tx, ty);
+        if (distance < nearestDistance) {
+          nearestDistance = distance;
+          nearestEdge = edge;
+        }
+      }
+
+      if (nearestEdge) {
+        const [a, b] = edgeEndpoints(nearestEdge);
+        const idx = nearestEdge._index;
+        setHoveredEdge({
+          idx,
+          a,
+          b,
+          weight: Number(weightOf(nearestEdge) || 0),
+          sigma: Number(sigmaOf(nearestEdge) || 0),
+          delta: edgeDeltas?.[idx] || null,
+          x: ev.clientX,
+          y: ev.clientY,
+        });
+      } else {
+        setHoveredEdge(null);
+      }
+    };
+
+    const handleMouseLeave = () => {
+      hoverNodeIdRef.current = null;
+      setHoveredEdge(null);
     };
 
     canvas.addEventListener("mousemove", handleMouseMove);
+    canvas.addEventListener("mouseleave", handleMouseLeave);
     return () => {
       canvas.removeEventListener("mousemove", handleMouseMove);
+      canvas.removeEventListener("mouseleave", handleMouseLeave);
     };
-  }, [onNodeClick]);
+  }, [edgeDeltas, onNodeClick]);
+
+  useEffect(() => {
+    setHoveredEdge((current) => {
+      if (!current) {
+        return current;
+      }
+      return {
+        ...current,
+        delta: edgeDeltas?.[current.idx] || null,
+      };
+    });
+  }, [edgeDeltas]);
 
   useEffect(() => {
     const handleResize = () => {
@@ -335,6 +432,7 @@ const GraphCanvas = forwardRef(function GraphCanvas(
       const graph = graphRef.current;
       const sourceId = resolveSourceNode(graph.nodes, graph.links);
       const targetId = resolveTargetNode(graph.nodes);
+      const maxWeight = Math.max(1, ...graph.links.map((edge) => weightOf(edge)));
 
       const nodeById = new Map();
       graph.nodes.forEach((n) => nodeById.set(n.id, n));
@@ -355,15 +453,13 @@ const GraphCanvas = forwardRef(function GraphCanvas(
 
         const isOptimal = optimalEdgeKeys.has(k);
         const isFlashing = flashingEdgeSet.has(edge._index) || flashingEdgeSet.has(k);
+        const isPulsing = pulsingEdgeSet.has(edge._index) || pulsingEdgeSet.has(k);
         const isSpt =
           sptByIndex.has(edge._index) ||
           sptByIndex.has(k) ||
           edge.inSPT === true;
 
-        let stroke = COLOR.edgeDefault;
-        if (isSpt) {
-          stroke = COLOR.edgeSpt;
-        }
+        let stroke = getEdgeColor(weightOf(edge), maxWeight);
         if (isOptimal) {
           stroke = COLOR.edgeOptimal;
         }
@@ -372,11 +468,23 @@ const GraphCanvas = forwardRef(function GraphCanvas(
         }
 
         const sigma = sigmaOf(edge);
-        const thickness = showUncertainty ? 1 + sigma : 1.4;
+        let thickness = showUncertainty ? 1 + sigma : 1.4;
+        if (isSpt) {
+          thickness += 0.7;
+        }
+        if (isPulsing) {
+          const pulse = (Math.sin(performance.now() / 70) + 1) * 0.5;
+          thickness += 1.2 * pulse;
+        }
 
         ctx.save();
         ctx.strokeStyle = stroke;
         ctx.lineWidth = thickness;
+
+        if (isFlashing) {
+          const alpha = 0.45 + ((Math.sin(performance.now() / 60) + 1) * 0.5) * 0.55;
+          ctx.globalAlpha = alpha;
+        }
 
         if (showUncertainty && sigma > 0.8) {
           ctx.setLineDash([6, 6]);
@@ -532,6 +640,7 @@ const GraphCanvas = forwardRef(function GraphCanvas(
     optimalPath,
     optimalNodeSet,
     optimalEdgeKeys,
+    pulsingEdgeSet,
     sptByIndex,
     flashingEdgeSet,
     showUncertainty,
@@ -539,16 +648,41 @@ const GraphCanvas = forwardRef(function GraphCanvas(
   ]);
 
   return (
-    <canvas
-      ref={canvasRef}
-      style={{
-        width: "100%",
-        height: "100%",
-        display: "block",
-        cursor: "crosshair",
-        background: "#09090b",
-      }}
-    />
+    <div className="graph-canvas-wrap">
+      <canvas
+        ref={canvasRef}
+        style={{
+          width: "100%",
+          height: "100%",
+          display: "block",
+          cursor: "crosshair",
+          background: "#09090b",
+        }}
+      />
+      {hoveredEdge ? (
+        <div
+          className="edge-tooltip"
+          style={{
+            left: `${hoveredEdge.x + 12}px`,
+            top: `${hoveredEdge.y + 12}px`,
+          }}
+        >
+          <div className="edge-tooltip-title">
+            Edge {idLabel(hoveredEdge.a)} → {idLabel(hoveredEdge.b)}
+          </div>
+          <div>weight: {hoveredEdge.weight.toFixed(2)}</div>
+          <div>sigma: {hoveredEdge.sigma.toFixed(2)}</div>
+          {hoveredEdge.delta ? (
+            <div className="edge-tooltip-delta">
+              {hoveredEdge.delta.from.toFixed(2)} → {hoveredEdge.delta.to.toFixed(2)}
+              {Number.isFinite(hoveredEdge.delta.pct)
+                ? ` (${hoveredEdge.delta.pct >= 0 ? "+" : ""}${hoveredEdge.delta.pct.toFixed(1)}%)`
+                : ""}
+            </div>
+          ) : null}
+        </div>
+      ) : null}
+    </div>
   );
 });
 
