@@ -216,57 +216,60 @@ def api_reset():
 
 @app.post("/api/load_osm")
 def api_load_osm():
-    payload = _get_json_body() or {}
-
-    max_nodes = payload.get("max_nodes", 50)
-    rebuild = bool(payload.get("rebuild", False))
-
-    if not isinstance(max_nodes, int) or max_nodes <= 0:
-        return _build_error_response("invalid_request: max_nodes must be a positive integer")
+    landmarks_path = PROJECT_ROOT / "data" / "noida_landmarks.json"
 
     try:
-        try:
-            from .osm_loader import DEFAULT_OUTPUT_PATH, load_noida_graph, load_or_create_noida_graph
-        except ImportError:
-            from osm_loader import DEFAULT_OUTPUT_PATH, load_noida_graph, load_or_create_noida_graph
-    except ImportError as exc:
-        return _build_error_response(
-            f"osm_dependency_missing: {exc}",
-            status=500,
-        )
-
-    try:
-        graph_payload = load_or_create_noida_graph(rebuild=rebuild, max_nodes=max_nodes)
+        raw = landmarks_path.read_text(encoding="utf-8")
+        data = json.loads(raw)
     except Exception as exc:  # noqa: BLE001
-        try:
-            graph_payload = load_noida_graph(DEFAULT_OUTPUT_PATH)
-            warn_event = {
-                "type": "warn",
-                "message": f"osm_load_failed_live_fetch_using_cache: {exc}",
-                "cachedFile": str(DEFAULT_OUTPUT_PATH),
-            }
-            socketio.emit("cpp_event", warn_event)
-        except Exception:  # noqa: BLE001
-            return _build_error_response(
-                f"osm_load_failed: {exc}",
-                status=500,
-            )
+        return _build_error_response(f"landmarks_load_failed: {exc}", status=500)
+
+    nodes_list = data.get("nodes", [])
+    edges_list = data.get("edges", [])
+    n = len(nodes_list)
+
+    # Build edge tuples for C++ (a, b, weight, sigma)
+    edge_tuples = []
+    edge_types = []
+    for edge in edges_list:
+        a, b, w, s = edge[0], edge[1], edge[2], edge[3]
+        road_type = edge[4] if len(edge) > 4 else "secondary"
+        edge_tuples.append([int(a), int(b), float(w), float(s)])
+        edge_types.append(road_type)
 
     command = {
         "cmd": "init",
-        "nodes": graph_payload.get("nodes", 0),
-        "edges": graph_payload.get("edges", []),
+        "nodes": n,
+        "edges": edge_tuples,
     }
 
-    return _send_and_emit(
+    result = _send_and_emit(
         command,
         extra={
             "graph": {
-                "nodes": graph_payload.get("nodes", 0),
-                "edges": graph_payload.get("edges", []),
+                "nodes": n,
+                "edges": edge_tuples,
             }
         },
     )
+
+    # Emit rich graph metadata for the frontend
+    node_coords = [[nd["id"], nd["lat"], nd["lng"]] for nd in nodes_list]
+    node_labels = {nd["id"]: nd.get("label", f"N{nd['id']}") for nd in nodes_list}
+    node_types = {nd["id"]: nd.get("type", "residential") for nd in nodes_list}
+
+    socketio.emit("cpp_event", {
+        "type": "graph_meta",
+        "nodeCoords": node_coords,
+        "nodeLabels": node_labels,
+        "nodeTypes": node_types,
+        "edgeTypes": edge_types,
+        "nodeCount": n,
+        "edgeCount": len(edge_tuples),
+        "place": "Noida, Uttar Pradesh, India",
+    })
+
+    return result
 
 
 @app.post("/api/save_graph")

@@ -1,75 +1,24 @@
-import React, {
-  forwardRef,
-  useCallback,
-  useEffect,
-  useImperativeHandle,
-  useMemo,
-  useRef,
-  useState,
-} from "react";
-import {
-  forceCenter,
-  forceLink,
-  forceManyBody,
-  forceSimulation,
-} from "d3-force";
+import { useCallback, useEffect, useMemo, useRef } from "react";
+import { forceCenter, forceLink, forceManyBody, forceSimulation } from "d3-force";
+import * as L from "leaflet";
 
 const COLOR = {
-  edgeDefault: "#9ca3af",
+  edgeDefault: "#737b87",
   edgeSpt: "#7c6ef7",
-  edgeOptimal: "#2dd4bf",
+  edgePath: "#2dd4bf",
   edgeFlash: "#ef4444",
-  nodeDark: "#111827",
-  nodeBorder: "#374151",
-  source: "#7c6ef7",
-  target: "#2dd4bf",
-  visiting: "#f59e0b",
+  nodeFill: "#111418",
+  nodeBorder: "#2a3444",
   text: "#e5e7eb",
-  labelSub: "#9ca3af",
+  subText: "#9ca3af",
 };
 
-const NODE_RADIUS = 18;
-const HOVER_RADIUS = 22;
-const RIPPLE_MS = 400;
-
-function getEdgeColor(weight, maxWeight) {
-  const safeMax = Math.max(0.1, Number(maxWeight) || 1);
-  const ratio = Math.max(0, Math.min(1, (Number(weight) || 0) / safeMax));
-
-  if (ratio < 0.25) {
-    return "#22c55e";
-  }
-  if (ratio < 0.5) {
-    return "#facc15";
-  }
-  if (ratio < 0.75) {
-    return "#fb923c";
-  }
-  return "#ef4444";
-}
-
-function distanceToSegment(px, py, x1, y1, x2, y2) {
-  const dx = x2 - x1;
-  const dy = y2 - y1;
-
-  if (Math.abs(dx) < 1e-9 && Math.abs(dy) < 1e-9) {
-    return Math.hypot(px - x1, py - y1);
-  }
-
-  const t = Math.max(0, Math.min(1, ((px - x1) * dx + (py - y1) * dy) / (dx * dx + dy * dy)));
-  const projX = x1 + t * dx;
-  const projY = y1 + t * dy;
-  return Math.hypot(px - projX, py - projY);
-}
-
-function edgeEndpoints(edge) {
-  const a = typeof edge.a === "number" ? edge.a : edge.source?.id ?? edge.source;
-  const b = typeof edge.b === "number" ? edge.b : edge.target?.id ?? edge.target;
-  return [a, b];
-}
+const NODE_RADIUS = 16;
+const NODE_RADIUS_MAP = 9;
+const RIPPLE_MS = 520;
 
 function edgeKey(a, b) {
-  if (typeof a !== "number" || typeof b !== "number") {
+  if (!Number.isInteger(a) || !Number.isInteger(b)) {
     return "";
   }
   return a < b ? `${a}-${b}` : `${b}-${a}`;
@@ -77,419 +26,371 @@ function edgeKey(a, b) {
 
 function nodeLabel(node) {
   if (typeof node.label === "string" && node.label.length > 0) {
-    return node.label;
+    // For short labels (e.g. "A", "N0"), show as-is; for long labels, show node ID
+    if (node.label.length <= 4) {
+      return node.label;
+    }
+    // Show short abbreviation inside circle
+    return String(node.id);
   }
+
   const id = Number(node.id);
-  if (Number.isFinite(id) && id >= 0 && id < 26) {
+  if (Number.isInteger(id) && id >= 0 && id < 26) {
     return String.fromCharCode(65 + id);
   }
   return String(node.id ?? "?");
 }
 
-function idLabel(id) {
-  if (Number.isFinite(id) && id >= 0 && id < 26) {
-    return String.fromCharCode(65 + id);
+function fullNodeLabel(node) {
+  if (typeof node.label === "string" && node.label.length > 4) {
+    // Truncate to first 2 words for readability
+    const words = node.label.split(/\s+/);
+    return words.length > 2 ? words.slice(0, 2).join(" ") : node.label;
   }
-  return `N${id}`;
+  return null; // No extra label needed
 }
 
-function nodeDistanceLabel(node) {
-  const value =
-    typeof node.dist === "number"
-      ? node.dist
-      : typeof node.distance === "number"
-        ? node.distance
-        : null;
-
-  if (value == null || !Number.isFinite(value)) {
+function distanceLabel(node) {
+  const value = Number(node.dist);
+  if (!Number.isFinite(value)) {
     return "inf";
   }
   return value.toFixed(1);
 }
 
-function weightOf(edge) {
-  return typeof edge.weight === "number" ? edge.weight : 1;
+function edgeWeight(edge) {
+  return Number.isFinite(Number(edge.weight)) ? Number(edge.weight) : 1;
 }
 
-function sigmaOf(edge) {
-  return typeof edge.sigma === "number" ? edge.sigma : 0;
+function edgeSigma(edge) {
+  return Number.isFinite(Number(edge.sigma)) ? Number(edge.sigma) : 0;
 }
 
-function resolveSourceNode(nodes, links) {
-  const explicit = nodes.find((n) => n.isSource || n.source || n.role === "source");
-  if (explicit) {
-    return explicit.id;
+function setupCanvas(canvas) {
+  const parent = canvas.parentElement;
+  const width = Math.max(320, parent?.clientWidth || 900);
+  const height = Math.max(280, parent?.clientHeight || 560);
+  const dpr = window.devicePixelRatio || 1;
+
+  canvas.width = Math.floor(width * dpr);
+  canvas.height = Math.floor(height * dpr);
+  canvas.style.width = `${width}px`;
+  canvas.style.height = `${height}px`;
+
+  const ctx = canvas.getContext("2d");
+  if (!ctx) {
+    return null;
   }
 
-  const incoming = new Set();
-  links.forEach((e) => {
-    const [, b] = edgeEndpoints(e);
-    if (typeof b === "number") {
-      incoming.add(b);
-    }
-  });
-
-  const rootCandidate = nodes.find((n) => !incoming.has(n.id));
-  return rootCandidate ? rootCandidate.id : null;
+  ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
+  return { width, height, ctx };
 }
 
-function resolveTargetNode(nodes) {
-  const explicit = nodes.find((n) => n.isTarget || n.target || n.role === "target");
-  if (explicit) {
-    return explicit.id;
-  }
-  return null;
-}
-
-const GraphCanvas = forwardRef(function GraphCanvas(
-  {
-    nodes = [],
-    edges = [],
-    sptEdges = [],
-    visitingNodes = [],
-    optimalPath = [],
-    flashingEdges = [],
-    pulsingEdges = [],
-    showUncertainty = false,
-    edgeDeltas = {},
-    onNodeClick,
-  },
-  ref
-) {
+export default function GraphCanvas({
+  nodes = [],
+  edges = [],
+  sptEdges = [],
+  visitingNodes = [],
+  optimalPath = [],
+  flashingEdges = [],
+  showUncertainty = false,
+  mapMode = false,
+  nodeCoords = {},
+  onEdgeClick,
+}) {
   const canvasRef = useRef(null);
-  const simRef = useRef(null);
+  const simulationRef = useRef(null);
   const graphRef = useRef({ nodes: [], links: [] });
-  const animationRef = useRef(null);
-  const ripplesRef = useRef([]);
-  const visitingPrevRef = useRef(new Set());
-  const hoverNodeIdRef = useRef(null);
-  const [hoveredEdge, setHoveredEdge] = useState(null);
+  const frameRef = useRef(null);
+  const rippleRef = useRef([]);
+  const previousVisitingRef = useRef(new Set());
+  const leafletMapRef = useRef(null);
+  const mapContainerRef = useRef(null);
+  const nodeCoordsRef = useRef(nodeCoords);
+  nodeCoordsRef.current = nodeCoords;
 
+  const sptSet = useMemo(() => new Set(sptEdges), [sptEdges]);
+  const flashSet = useMemo(() => new Set(flashingEdges), [flashingEdges]);
   const visitingSet = useMemo(() => new Set(visitingNodes), [visitingNodes]);
 
-  const sptByIndex = useMemo(() => new Set(sptEdges), [sptEdges]);
-
-  const optimalNodeSet = useMemo(() => new Set(optimalPath), [optimalPath]);
-
-  const flashingEdgeSet = useMemo(() => new Set(flashingEdges), [flashingEdges]);
-
-  const pulsingEdgeSet = useMemo(() => new Set(pulsingEdges), [pulsingEdges]);
-
-  const optimalEdgeKeys = useMemo(() => {
-    const keys = new Set();
+  const optimalEdgeSet = useMemo(() => {
+    const set = new Set();
     for (let i = 0; i < optimalPath.length - 1; i += 1) {
-      keys.add(edgeKey(optimalPath[i], optimalPath[i + 1]));
+      set.add(edgeKey(optimalPath[i], optimalPath[i + 1]));
     }
-    return keys;
+    return set;
   }, [optimalPath]);
 
-  const triggerRipple = useCallback((nodeId) => {
-    ripplesRef.current.push({
-      nodeId,
-      startedAt: performance.now(),
-    });
-  }, []);
-
-  useImperativeHandle(
-    ref,
-    () => ({
-      triggerRipple,
-    }),
-    [triggerRipple]
-  );
-
-  const setupCanvasSize = useCallback(() => {
-    const canvas = canvasRef.current;
-    if (!canvas) {
-      return null;
-    }
-
-    const parent = canvas.parentElement;
-    const width = Math.max(320, parent?.clientWidth || 900);
-    const height = Math.max(260, parent?.clientHeight || 560);
-    const dpr = window.devicePixelRatio || 1;
-
-    canvas.width = Math.floor(width * dpr);
-    canvas.height = Math.floor(height * dpr);
-    canvas.style.width = `${width}px`;
-    canvas.style.height = `${height}px`;
-
-    const ctx = canvas.getContext("2d");
-    if (!ctx) {
-      return null;
-    }
-
-    ctx.setTransform(dpr, 0, 0, dpr, 0, 0);
-    return { width, height, ctx };
-  }, []);
-
+  // ── Leaflet map lifecycle ──────────────────────────────────────────
   useEffect(() => {
-    const canvasSetup = setupCanvasSize();
-    if (!canvasSetup) {
+    if (!mapMode) {
+      if (leafletMapRef.current) {
+        leafletMapRef.current.remove();
+        leafletMapRef.current = null;
+      }
       return undefined;
     }
 
-    const { width, height } = canvasSetup;
+    const el = mapContainerRef.current;
+    if (!el) return undefined;
 
-    const simNodes = nodes.map((n) => ({ ...n }));
-    const simLinks = edges.map((e, index) => {
-      const [a, b] = edgeEndpoints(e);
-      return {
-        ...e,
-        _index: index,
-        source: a,
-        target: b,
-      };
-    });
+    // Build bounds from actual node coordinates
+    const coordEntries = Object.values(nodeCoords);
+    let center = [28.5355, 77.3910]; // Noida default
+    let bounds = null;
 
-    graphRef.current = { nodes: simNodes, links: simLinks };
-
-    if (simRef.current) {
-      simRef.current.stop();
+    if (coordEntries.length > 0) {
+      const lats = coordEntries.map((c) => c.lat);
+      const lngs = coordEntries.map((c) => c.lng);
+      const minLat = Math.min(...lats);
+      const maxLat = Math.max(...lats);
+      const minLng = Math.min(...lngs);
+      const maxLng = Math.max(...lngs);
+      center = [(minLat + maxLat) / 2, (minLng + maxLng) / 2];
+      bounds = [[minLat, minLng], [maxLat, maxLng]];
     }
 
-    const simulation = forceSimulation(simNodes)
-      .force(
-        "link",
-        forceLink(simLinks)
-          .id((d) => d.id)
-          .distance((l) => {
-            const w = weightOf(l);
-            return Math.max(30, Math.min(240, 30 + w * 18));
-          })
-          .strength(0.4)
-      )
-      .force("charge", forceManyBody().strength(-200))
-      .force("center", forceCenter(width / 2, height / 2))
-      .alpha(1)
-      .alphaDecay(0.06)
-      .velocityDecay(0.4);
-
-    simRef.current = simulation;
-
-    simulation.on("tick", () => {
-      // draw loop is RAF-driven; ticks only update node positions.
+    const map = L.map(el, {
+      center,
+      zoom: 12,
+      zoomControl: true,
     });
 
-    simulation.alpha(1).restart();
+    if (bounds) {
+      map.fitBounds(bounds, { padding: [40, 40] });
+    }
+
+    L.tileLayer("https://{s}.basemaps.cartocdn.com/dark_all/{z}/{x}/{y}{r}.png", {
+      attribution: '© <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors © <a href="https://carto.com/attributions">CARTO</a>',
+      subdomains: 'abcd',
+      maxZoom: 20,
+      opacity: 0.95,
+    }).addTo(map);
+
+    leafletMapRef.current = map;
+
+    // Canvas redraws are handled in the animation loop — just invalidate on move/zoom
+    const onMapChange = () => {
+      /* draw loop will pick up new positions automatically */
+    };
+    map.on("move", onMapChange);
+    map.on("zoom", onMapChange);
 
     return () => {
-      simulation.stop();
+      map.off("move", onMapChange);
+      map.off("zoom", onMapChange);
+      map.remove();
+      leafletMapRef.current = null;
     };
-  }, [nodes, edges, setupCanvasSize]);
+  }, [mapMode, nodeCoords]);
 
-  useEffect(() => {
-    const prev = visitingPrevRef.current;
-    const current = new Set(visitingNodes);
-    current.forEach((nodeId) => {
-      if (!prev.has(nodeId)) {
-        triggerRipple(nodeId);
-      }
-    });
-    visitingPrevRef.current = current;
-  }, [visitingNodes, triggerRipple]);
-
+  // ── D3 force simulation (demo mode only) ──────────────────────────
   useEffect(() => {
     const canvas = canvasRef.current;
     if (!canvas) {
       return undefined;
     }
 
-    const handleMouseMove = (ev) => {
-      if (typeof onNodeClick !== "function") {
-        return;
+    const setup = setupCanvas(canvas);
+    if (!setup) {
+      return undefined;
+    }
+
+    const localNodes = nodes.map((node) => ({ ...node }));
+    const localLinks = edges.map((edge, index) => ({
+      ...edge,
+      _index: index,
+      source: edge.a,
+      target: edge.b,
+    }));
+    graphRef.current = { nodes: localNodes, links: localLinks };
+
+    if (simulationRef.current) {
+      simulationRef.current.stop();
+    }
+
+    if (!mapMode) {
+      const simulation = forceSimulation(localNodes)
+        .force(
+          "link",
+          forceLink(localLinks)
+            .id((d) => d.id)
+            .distance((link) => Math.max(50, Math.min(200, 60 + edgeWeight(link) * 16)))
+            .strength(0.4)
+        )
+        .force("charge", forceManyBody().strength(-230))
+        .force("center", forceCenter(setup.width / 2, setup.height / 2))
+        .alpha(1)
+        .alphaDecay(0.06)
+        .velocityDecay(0.38);
+
+      simulationRef.current = simulation;
+      simulation.alpha(1).restart();
+
+      const onResize = () => {
+        const nextSetup = setupCanvas(canvas);
+        if (!nextSetup || !simulationRef.current) {
+          return;
+        }
+
+        simulationRef.current.force("center", forceCenter(nextSetup.width / 2, nextSetup.height / 2));
+        simulationRef.current.alpha(0.5).restart();
+      };
+
+      window.addEventListener("resize", onResize);
+      return () => {
+        window.removeEventListener("resize", onResize);
+        simulation.stop();
+      };
+    }
+
+    // Map mode — no force simulation
+    if (simulationRef.current) {
+      simulationRef.current.stop();
+      simulationRef.current = null;
+    }
+
+    const onResize = () => {
+      setupCanvas(canvas);
+      if (leafletMapRef.current) {
+        leafletMapRef.current.invalidateSize();
       }
+    };
+    window.addEventListener("resize", onResize);
+    return () => {
+      window.removeEventListener("resize", onResize);
+    };
+  }, [edges, nodes, mapMode]);
 
-      const rect = canvas.getBoundingClientRect();
-      const x = ev.clientX - rect.left;
-      const y = ev.clientY - rect.top;
+  // ── Ripple tracking ────────────────────────────────────────────────
+  useEffect(() => {
+    const previous = previousVisitingRef.current;
+    const next = new Set(visitingNodes);
 
-      let closest = null;
-      let bestDistSq = HOVER_RADIUS * HOVER_RADIUS;
-
-      for (const n of graphRef.current.nodes) {
-        if (typeof n.x !== "number" || typeof n.y !== "number") {
-          continue;
-        }
-
-        const dx = x - n.x;
-        const dy = y - n.y;
-        const d2 = dx * dx + dy * dy;
-
-        if (d2 <= bestDistSq) {
-          bestDistSq = d2;
-          closest = n;
-        }
-      }
-
-      const nextId = closest ? closest.id : null;
-      if (hoverNodeIdRef.current !== nextId) {
-        hoverNodeIdRef.current = nextId;
-        if (closest) {
-          onNodeClick(closest);
-        }
-      }
-
-      let nearestEdge = null;
-      let nearestDistance = 12;
-      for (const edge of graphRef.current.links) {
-        const sx = edge.source?.x;
-        const sy = edge.source?.y;
-        const tx = edge.target?.x;
-        const ty = edge.target?.y;
-        if (![sx, sy, tx, ty].every(Number.isFinite)) {
-          continue;
-        }
-
-        const distance = distanceToSegment(x, y, sx, sy, tx, ty);
-        if (distance < nearestDistance) {
-          nearestDistance = distance;
-          nearestEdge = edge;
-        }
-      }
-
-      if (nearestEdge) {
-        const [a, b] = edgeEndpoints(nearestEdge);
-        const idx = nearestEdge._index;
-        setHoveredEdge({
-          idx,
-          a,
-          b,
-          weight: Number(weightOf(nearestEdge) || 0),
-          sigma: Number(sigmaOf(nearestEdge) || 0),
-          delta: edgeDeltas?.[idx] || null,
-          x: ev.clientX,
-          y: ev.clientY,
+    next.forEach((nodeId) => {
+      if (!previous.has(nodeId)) {
+        rippleRef.current.push({
+          nodeId,
+          startedAt: performance.now(),
         });
-      } else {
-        setHoveredEdge(null);
       }
-    };
-
-    const handleMouseLeave = () => {
-      hoverNodeIdRef.current = null;
-      setHoveredEdge(null);
-    };
-
-    canvas.addEventListener("mousemove", handleMouseMove);
-    canvas.addEventListener("mouseleave", handleMouseLeave);
-    return () => {
-      canvas.removeEventListener("mousemove", handleMouseMove);
-      canvas.removeEventListener("mouseleave", handleMouseLeave);
-    };
-  }, [edgeDeltas, onNodeClick]);
-
-  useEffect(() => {
-    setHoveredEdge((current) => {
-      if (!current) {
-        return current;
-      }
-      return {
-        ...current,
-        delta: edgeDeltas?.[current.idx] || null,
-      };
     });
-  }, [edgeDeltas]);
 
+    previousVisitingRef.current = next;
+  }, [visitingNodes]);
+
+  // ── Draw loop ──────────────────────────────────────────────────────
   useEffect(() => {
-    const handleResize = () => {
-      const info = setupCanvasSize();
-      if (!info) {
-        return;
-      }
-
-      if (simRef.current) {
-        simRef.current.force("center", forceCenter(info.width / 2, info.height / 2));
-        simRef.current.alpha(0.5).restart();
-      }
-    };
-
-    window.addEventListener("resize", handleResize);
-    return () => window.removeEventListener("resize", handleResize);
-  }, [setupCanvasSize]);
-
-  useEffect(() => {
-    const drawFrame = () => {
+    const draw = () => {
       const canvas = canvasRef.current;
       if (!canvas) {
-        animationRef.current = requestAnimationFrame(drawFrame);
+        frameRef.current = requestAnimationFrame(draw);
         return;
       }
 
       const ctx = canvas.getContext("2d");
       if (!ctx) {
-        animationRef.current = requestAnimationFrame(drawFrame);
+        frameRef.current = requestAnimationFrame(draw);
         return;
       }
 
-      const width = parseFloat(canvas.style.width) || 0;
-      const height = parseFloat(canvas.style.height) || 0;
+      // Re-setup canvas size every frame (handles resize)
+      const cw = parseFloat(canvas.style.width) || 0;
+      const ch = parseFloat(canvas.style.height) || 0;
 
-      ctx.clearRect(0, 0, width, height);
-      ctx.fillStyle = "#09090b";
-      ctx.fillRect(0, 0, width, height);
+      ctx.clearRect(0, 0, cw, ch);
+
+      if (!mapMode) {
+        ctx.fillStyle = "#0a0c0f";
+        ctx.fillRect(0, 0, cw, ch);
+      }
 
       const graph = graphRef.current;
-      const sourceId = resolveSourceNode(graph.nodes, graph.links);
-      const targetId = resolveTargetNode(graph.nodes);
-      const maxWeight = Math.max(1, ...graph.links.map((edge) => weightOf(edge)));
-
       const nodeById = new Map();
-      graph.nodes.forEach((n) => nodeById.set(n.id, n));
+      graph.nodes.forEach((node) => {
+        nodeById.set(node.id, node);
+      });
 
-      // Edges
+      // ── Position helper ──────────────────────────────────────────
+      const getPos = (nodeId) => {
+        if (mapMode && leafletMapRef.current && nodeCoords[nodeId]) {
+          const { lat, lng } = nodeCoords[nodeId];
+          const point = leafletMapRef.current.latLngToContainerPoint(L.latLng(lat, lng));
+          return { x: point.x, y: point.y };
+        }
+        const node = nodeById.get(nodeId);
+        return node ? { x: node.x, y: node.y } : null;
+      };
+
+      // Compute max weight for color scaling
+      const maxWeight = graph.links.reduce(
+        (m, e) => Math.max(m, edgeWeight(e)),
+        1
+      );
+
+      // ── Draw edges ─────────────────────────────────────────────
       for (const edge of graph.links) {
-        const sx = edge.source?.x;
-        const sy = edge.source?.y;
-        const tx = edge.target?.x;
-        const ty = edge.target?.y;
+        const a = Number.isInteger(edge.a) ? edge.a : edge.source?.id;
+        const b = Number.isInteger(edge.b) ? edge.b : edge.target?.id;
+
+        const srcPos = getPos(a) || { x: edge.source?.x, y: edge.source?.y };
+        const tgtPos = getPos(b) || { x: edge.target?.x, y: edge.target?.y };
+
+        const sx = srcPos.x;
+        const sy = srcPos.y;
+        const tx = tgtPos.x;
+        const ty = tgtPos.y;
 
         if (![sx, sy, tx, ty].every(Number.isFinite)) {
           continue;
         }
 
-        const [a, b] = edgeEndpoints(edge);
-        const k = edgeKey(a, b);
+        const isSpt = sptSet.has(edge._index) || edge.inSPT === true;
+        const isFlash = flashSet.has(edge._index);
+        const isOptimal = optimalEdgeSet.has(edgeKey(a, b));
 
-        const isOptimal = optimalEdgeKeys.has(k);
-        const isFlashing = flashingEdgeSet.has(edge._index) || flashingEdgeSet.has(k);
-        const isPulsing = pulsingEdgeSet.has(edge._index) || pulsingEdgeSet.has(k);
-        const isSpt =
-          sptByIndex.has(edge._index) ||
-          sptByIndex.has(k) ||
-          edge.inSPT === true;
+        // Weight-based color: green → yellow → red
+        const t = Math.min(1, edgeWeight(edge) / maxWeight);
+        const r = Math.round(34 + t * 221);     // 34 → 255
+        const g = Math.round(197 - t * 128);    // 197 → 69
+        const bColor = Math.round(94 - t * 25); // 94 → 69
+        let stroke = `rgb(${r},${g},${bColor})`;
 
-        let stroke = getEdgeColor(weightOf(edge), maxWeight);
-        if (isOptimal) {
-          stroke = COLOR.edgeOptimal;
+        if (isSpt) {
+          stroke = COLOR.edgeSpt;
         }
-        if (isFlashing) {
+        if (isOptimal) {
+          stroke = "#60a5fa"; // bright blue for optimal path
+        }
+        if (isFlash) {
           stroke = COLOR.edgeFlash;
         }
 
-        const sigma = sigmaOf(edge);
-        let thickness = showUncertainty ? 1 + sigma : 1.4;
-        if (isSpt) {
-          thickness += 0.7;
+        // Weight-based thickness: 1px (light) → 4px (heavy)
+        let lineWidth = 1 + t * 3;
+        if (showUncertainty) {
+          lineWidth = Math.max(lineWidth, 1 + edgeSigma(edge));
         }
-        if (isPulsing) {
-          const pulse = (Math.sin(performance.now() / 70) + 1) * 0.5;
-          thickness += 1.2 * pulse;
+        if (isSpt) {
+          lineWidth += 0.9;
+        }
+        if (isOptimal) {
+          lineWidth += 1.2;
         }
 
         ctx.save();
         ctx.strokeStyle = stroke;
-        ctx.lineWidth = thickness;
+        ctx.lineWidth = lineWidth;
 
-        if (isFlashing) {
-          const alpha = 0.45 + ((Math.sin(performance.now() / 60) + 1) * 0.5) * 0.55;
-          ctx.globalAlpha = alpha;
-        }
-
-        if (showUncertainty && sigma > 0.8) {
-          ctx.setLineDash([6, 6]);
+        if (showUncertainty && edgeSigma(edge) > 0.8) {
+          ctx.setLineDash([6, 5]);
         } else {
           ctx.setLineDash([]);
+        }
+
+        if (isFlash) {
+          const flashAlpha = 0.5 + ((Math.sin(performance.now() / 75) + 1) * 0.5) * 0.5;
+          ctx.globalAlpha = flashAlpha;
         }
 
         ctx.beginPath();
@@ -497,102 +398,119 @@ const GraphCanvas = forwardRef(function GraphCanvas(
         ctx.lineTo(tx, ty);
         ctx.stroke();
 
-        // Edge weight label offset perpendicular to edge.
         const mx = (sx + tx) / 2;
         const my = (sy + ty) / 2;
         const dx = tx - sx;
         const dy = ty - sy;
-        const len = Math.hypot(dx, dy) || 1;
-        const ox = (-dy / len) * 10;
-        const oy = (dx / len) * 10;
+        const length = Math.hypot(dx, dy) || 1;
+        const ox = (-dy / length) * 10;
+        const oy = (dx / length) * 10;
 
-        ctx.font = "10px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
-        ctx.textAlign = "center";
-        ctx.textBaseline = "middle";
-        ctx.fillStyle = "#d1d5db";
-
-        const wText = Number.isFinite(weightOf(edge)) ? weightOf(edge).toFixed(1) : "?";
-        ctx.fillText(wText, mx + ox, my + oy);
-
+        // Only show weight labels in demo mode — map mode uses color/thickness
+        if (!mapMode) {
+          ctx.fillStyle = "#cbd5e1";
+          ctx.font = "10px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
+          ctx.textAlign = "center";
+          ctx.textBaseline = "middle";
+          ctx.fillText(edgeWeight(edge).toFixed(1), mx + ox, my + oy);
+        }
         ctx.restore();
       }
 
-      // Nodes
-      for (const n of graph.nodes) {
-        const x = n.x;
-        const y = n.y;
+      // ── Draw nodes ─────────────────────────────────────────────
+      const radius = mapMode ? NODE_RADIUS_MAP : NODE_RADIUS;
+
+      for (const node of graph.nodes) {
+        const pos = getPos(node.id) || { x: node.x, y: node.y };
+        const x = pos.x;
+        const y = pos.y;
         if (![x, y].every(Number.isFinite)) {
           continue;
         }
 
-        const isSource = n.id === sourceId;
-        const isTarget = n.id === targetId;
-        const isVisiting = visitingSet.has(n.id);
-        const isOptimal = optimalNodeSet.has(n.id);
-
-        let fill = COLOR.nodeDark;
-        if (isSource) {
-          fill = COLOR.source;
-        }
-        if (isTarget) {
-          fill = COLOR.target;
-        }
-        if (isOptimal && !isSource && !isTarget) {
-          fill = "#134e4a";
-        }
+        const isVisiting = visitingSet.has(node.id);
+        const isOnOptPath = optimalPath.includes(node.id);
 
         ctx.beginPath();
-        ctx.arc(x, y, NODE_RADIUS, 0, Math.PI * 2);
-        ctx.fillStyle = fill;
+        ctx.arc(x, y, radius, 0, Math.PI * 2);
+        // Highlight nodes on the optimal path with a teal fill
+        ctx.fillStyle = isOnOptPath ? "#0e4a5c" : COLOR.nodeFill;
         ctx.fill();
-        ctx.lineWidth = 2;
-        ctx.strokeStyle = COLOR.nodeBorder;
+        ctx.lineWidth = isOnOptPath ? 2.5 : 2;
+        ctx.strokeStyle = isOnOptPath ? "#2dd4bf" : COLOR.nodeBorder;
         ctx.stroke();
 
-        // Visiting pulse ring.
         if (isVisiting) {
-          const t = performance.now() / 450;
-          const r = NODE_RADIUS + 3 + ((Math.sin(t * Math.PI * 2) + 1) * 0.5) * 6;
+          const t = performance.now() / 420;
+          const pulseRadius = radius + 4 + ((Math.sin(t * Math.PI * 2) + 1) * 0.5) * 6;
           ctx.beginPath();
-          ctx.arc(x, y, r, 0, Math.PI * 2);
-          ctx.strokeStyle = "rgba(245, 158, 11, 0.8)";
+          ctx.arc(x, y, pulseRadius, 0, Math.PI * 2);
+          ctx.strokeStyle = "rgba(45, 212, 191, 0.85)";
           ctx.lineWidth = 2;
           ctx.stroke();
         }
 
-        // Label inside node.
+        // Node ID inside circle
         ctx.fillStyle = COLOR.text;
-        ctx.font = "600 12px system-ui, -apple-system, Segoe UI, sans-serif";
+        const fontSize = mapMode ? 7 : 11;
+        ctx.font = `600 ${fontSize}px system-ui, -apple-system, Segoe UI, sans-serif`;
         ctx.textAlign = "center";
         ctx.textBaseline = "middle";
-        ctx.fillText(nodeLabel(n), x, y);
+        ctx.fillText(nodeLabel(node), x, y);
 
-        // Distance below node.
-        ctx.fillStyle = COLOR.labelSub;
-        ctx.font = "9px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
-        ctx.textBaseline = "top";
-        ctx.fillText(nodeDistanceLabel(n), x, y + NODE_RADIUS + 4);
+        if (!mapMode) {
+          // Demo mode: show full landmark name + distance below node
+          const full = fullNodeLabel(node);
+          if (full) {
+            ctx.fillStyle = "#dbeafe";
+            ctx.font = "600 9px system-ui, -apple-system, Segoe UI, sans-serif";
+            ctx.textBaseline = "top";
+            ctx.fillText(full, x, y + NODE_RADIUS + 2);
+
+            ctx.fillStyle = COLOR.subText;
+            ctx.font = "9px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
+            ctx.fillText(distanceLabel(node), x, y + NODE_RADIUS + 14);
+          } else {
+            ctx.fillStyle = COLOR.subText;
+            ctx.font = "10px ui-monospace, SFMono-Regular, Menlo, Consolas, monospace";
+            ctx.textBaseline = "top";
+            ctx.fillText(distanceLabel(node), x, y + NODE_RADIUS + 4);
+          }
+        } else {
+          // Map mode: show short label above the node only (no distance clutter)
+          const full = fullNodeLabel(node);
+          if (full) {
+            ctx.fillStyle = "rgba(219,234,254,0.9)";
+            ctx.font = "bold 9px system-ui, sans-serif";
+            ctx.textAlign = "center";
+            ctx.textBaseline = "bottom";
+            ctx.fillText(full, x, y - radius - 2);
+          }
+        }
       }
 
-      // Re-evaluation ripples.
+      // ── Ripples ────────────────────────────────────────────────
       const now = performance.now();
-      ripplesRef.current = ripplesRef.current.filter((ripple) => {
+      rippleRef.current = rippleRef.current.filter((ripple) => {
         const elapsed = now - ripple.startedAt;
         if (elapsed >= RIPPLE_MS) {
           return false;
         }
 
+        const pos = getPos(ripple.nodeId);
         const node = nodeById.get(ripple.nodeId);
-        if (!node || !Number.isFinite(node.x) || !Number.isFinite(node.y)) {
+        const rx = pos?.x ?? node?.x;
+        const ry = pos?.y ?? node?.y;
+        if (!Number.isFinite(rx) || !Number.isFinite(ry)) {
           return true;
         }
 
-        const t = elapsed / RIPPLE_MS;
-        const radius = NODE_RADIUS + 4 + t * 30;
-        const alpha = 1 - t;
+        const progress = elapsed / RIPPLE_MS;
+        const radius = NODE_RADIUS + 5 + progress * 32;
+        const alpha = 1 - progress;
 
         ctx.beginPath();
-        ctx.arc(node.x, node.y, radius, 0, Math.PI * 2);
+        ctx.arc(rx, ry, radius, 0, Math.PI * 2);
         ctx.strokeStyle = `rgba(124, 110, 247, ${alpha.toFixed(3)})`;
         ctx.lineWidth = 2;
         ctx.stroke();
@@ -600,90 +518,127 @@ const GraphCanvas = forwardRef(function GraphCanvas(
         return true;
       });
 
-      // Optimal path polyline on top.
+      // ── Optimal path overlay ───────────────────────────────────
       if (optimalPath.length > 1) {
         ctx.save();
-        ctx.strokeStyle = COLOR.edgeOptimal;
+        ctx.strokeStyle = COLOR.edgePath;
         ctx.lineWidth = 3;
         ctx.setLineDash([8, 6]);
 
         let started = false;
         ctx.beginPath();
         for (const nodeId of optimalPath) {
+          const pos = getPos(nodeId);
           const node = nodeById.get(nodeId);
-          if (!node || !Number.isFinite(node.x) || !Number.isFinite(node.y)) {
+          const px = pos?.x ?? node?.x;
+          const py = pos?.y ?? node?.y;
+          if (!Number.isFinite(px) || !Number.isFinite(py)) {
             continue;
           }
+
           if (!started) {
-            ctx.moveTo(node.x, node.y);
+            ctx.moveTo(px, py);
             started = true;
           } else {
-            ctx.lineTo(node.x, node.y);
+            ctx.lineTo(px, py);
           }
         }
+
         if (started) {
           ctx.stroke();
         }
         ctx.restore();
       }
 
-      animationRef.current = requestAnimationFrame(drawFrame);
+      frameRef.current = requestAnimationFrame(draw);
     };
 
-    animationRef.current = requestAnimationFrame(drawFrame);
+    frameRef.current = requestAnimationFrame(draw);
     return () => {
-      if (animationRef.current) {
-        cancelAnimationFrame(animationRef.current);
+      if (frameRef.current) {
+        cancelAnimationFrame(frameRef.current);
       }
     };
-  }, [
-    optimalPath,
-    optimalNodeSet,
-    optimalEdgeKeys,
-    pulsingEdgeSet,
-    sptByIndex,
-    flashingEdgeSet,
-    showUncertainty,
-    visitingSet,
-  ]);
+  }, [flashSet, mapMode, nodeCoords, optimalEdgeSet, optimalPath, showUncertainty, sptSet, visitingSet]);
+
+  // ── Edge click detection ──────────────────────────────────────
+  const handleCanvasClick = useCallback(
+    (e) => {
+      if (!onEdgeClick) return;
+      const canvas = canvasRef.current;
+      if (!canvas) return;
+      const rect = canvas.getBoundingClientRect();
+      const mx = e.clientX - rect.left;
+      const my = e.clientY - rect.top;
+      const graph = graphRef.current;
+      const nodeById = new Map();
+      graph.nodes.forEach((n) => nodeById.set(n.id, n));
+
+      const getPosLocal = (nodeId) => {
+        if (mapMode && leafletMapRef.current && nodeCoordsRef.current[nodeId]) {
+          const { lat, lng } = nodeCoordsRef.current[nodeId];
+          const pt = leafletMapRef.current.latLngToContainerPoint(L.latLng(lat, lng));
+          return { x: pt.x, y: pt.y };
+        }
+        const n = nodeById.get(nodeId);
+        return n ? { x: n.x, y: n.y } : null;
+      };
+
+      let bestIdx = -1;
+      let bestDist = 12; // max click distance in px
+
+      graph.links.forEach((edge) => {
+        const a = Number.isInteger(edge.a) ? edge.a : edge.source?.id;
+        const b = Number.isInteger(edge.b) ? edge.b : edge.target?.id;
+        const sp = getPosLocal(a) || { x: edge.source?.x, y: edge.source?.y };
+        const tp = getPosLocal(b) || { x: edge.target?.x, y: edge.target?.y };
+        if (![sp.x, sp.y, tp.x, tp.y].every(Number.isFinite)) return;
+
+        // Distance from point to line segment
+        const dx = tp.x - sp.x;
+        const dy = tp.y - sp.y;
+        const lenSq = dx * dx + dy * dy;
+        let t = lenSq === 0 ? 0 : ((mx - sp.x) * dx + (my - sp.y) * dy) / lenSq;
+        t = Math.max(0, Math.min(1, t));
+        const px = sp.x + t * dx;
+        const py = sp.y + t * dy;
+        const d = Math.hypot(mx - px, my - py);
+        if (d < bestDist) {
+          bestDist = d;
+          bestIdx = edge._index;
+        }
+      });
+
+      if (bestIdx >= 0) {
+        onEdgeClick(bestIdx);
+      }
+    },
+    [mapMode, onEdgeClick]
+  );
 
   return (
-    <div className="graph-canvas-wrap">
+    <div className="graph-canvas-wrap" style={{ position: "relative", width: "100%", height: "100%" }}>
+      {mapMode && (
+        <div
+          ref={mapContainerRef}
+          style={{ position: "absolute", inset: 0, zIndex: 0 }}
+        />
+      )}
       <canvas
         ref={canvasRef}
+        onClick={handleCanvasClick}
         style={{
+          position: "absolute",
+          inset: 0,
+          zIndex: 1,
           width: "100%",
           height: "100%",
           display: "block",
           cursor: "crosshair",
-          background: "#09090b",
+          background: mapMode ? "transparent" : "#09090b",
+          pointerEvents: "auto",
         }}
       />
-      {hoveredEdge ? (
-        <div
-          className="edge-tooltip"
-          style={{
-            left: `${hoveredEdge.x + 12}px`,
-            top: `${hoveredEdge.y + 12}px`,
-          }}
-        >
-          <div className="edge-tooltip-title">
-            Edge {idLabel(hoveredEdge.a)} → {idLabel(hoveredEdge.b)}
-          </div>
-          <div>weight: {hoveredEdge.weight.toFixed(2)}</div>
-          <div>sigma: {hoveredEdge.sigma.toFixed(2)}</div>
-          {hoveredEdge.delta ? (
-            <div className="edge-tooltip-delta">
-              {hoveredEdge.delta.from.toFixed(2)} → {hoveredEdge.delta.to.toFixed(2)}
-              {Number.isFinite(hoveredEdge.delta.pct)
-                ? ` (${hoveredEdge.delta.pct >= 0 ? "+" : ""}${hoveredEdge.delta.pct.toFixed(1)}%)`
-                : ""}
-            </div>
-          ) : null}
-        </div>
-      ) : null}
     </div>
   );
-});
-
-export default GraphCanvas;
+}

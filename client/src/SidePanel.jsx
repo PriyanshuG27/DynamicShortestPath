@@ -1,4 +1,4 @@
-import React, { useMemo } from "react";
+import { useMemo } from "react";
 
 const BAR_COLORS = {
   dijkstra: "#7c6ef7",
@@ -6,77 +6,128 @@ const BAR_COLORS = {
   bellman: "#f59e0b",
 };
 
-function progressWidth(value, max) {
-  if (!max || max <= 0) {
+function barPercent(value, maxValue) {
+  if (maxValue <= 0) {
     return 0;
   }
-  return Math.max(0, Math.min(100, (value / max) * 100));
+  return Math.max(0, Math.min(100, (value / maxValue) * 100));
 }
 
-function logKind(entry) {
-  const t = String(entry.type || "").toLowerCase();
-  if (t.includes("error") || t.includes("err")) {
-    return "err";
+function logClass(type) {
+  const normalized = String(type || "").toLowerCase();
+  if (normalized.includes("err")) {
+    return "log-item err";
   }
-  if (t.includes("warn") || t.includes("conflict")) {
-    return "warn";
+  if (normalized.includes("adversarial") || normalized.includes("warn")) {
+    return "log-item warn";
   }
-  return "highlight";
+  return "log-item";
 }
 
-export default function SidePanel({
-  dijkstraResult,
-  standardResult,
-  bellmanResult,
-  stats,
-  log,
-  traffic,
-}) {
+export default function SidePanel({ algoResults, stats, log, reliability, efficiency }) {
   const rows = useMemo(
     () => [
-      { key: "dijkstra", label: "Dijkstra", value: dijkstraResult?.relaxations ?? 0 },
-      { key: "standard", label: "Standard", value: standardResult?.relaxations ?? 0 },
-      { key: "bellman", label: "Bellman", value: bellmanResult?.relaxations ?? 0 },
+      {
+        key: "dijkstra",
+        label: "Dijkstra",
+        value: algoResults?.dijkstraResult?.relaxations ?? 0,
+      },
+      {
+        key: "standard",
+        label: "Standard",
+        value: algoResults?.standardResult?.relaxations ?? 0,
+      },
+      {
+        key: "bellman",
+        label: "Bellman",
+        value: algoResults?.bellmanResult?.relaxations ?? 0,
+      },
     ],
-    [dijkstraResult, standardResult, bellmanResult]
+    [algoResults]
   );
 
-  const maxRelax = Math.max(1, ...rows.map((r) => r.value));
-
-  const trafficBadge =
-    traffic?.level === "high"
-      ? "🔴 High"
-      : traffic?.level === "medium"
-        ? "🟡 Medium"
-        : "🟢 Low";
+  const maxValue = Math.max(1, ...rows.map((row) => Number(row.value) || 0));
 
   return (
     <aside className="side-panel">
-      <div className="panel-section">
+      <section className="panel-section">
         <h3>Algorithm Comparison</h3>
         <div className="algo-rows">
-          {rows.map((row) => {
-            const width = progressWidth(row.value, maxRelax);
-            return (
-              <div key={row.key} className="algo-row">
-                <div className="algo-label">{row.label}</div>
-                <div className="algo-bar-track">
-                  <div
-                    className="algo-bar-fill"
-                    style={{
-                      width: `${width}%`,
-                      backgroundColor: BAR_COLORS[row.key],
-                    }}
-                  />
-                </div>
-                <div className="algo-value">{row.value}</div>
+          {rows.map((row) => (
+            <div className="algo-row" key={row.key}>
+              <div className="algo-label">{row.label}</div>
+              <div className="algo-bar-track">
+                <div
+                  className="algo-bar-fill"
+                  style={{
+                    width: `${barPercent(Number(row.value) || 0, maxValue)}%`,
+                    backgroundColor: BAR_COLORS[row.key],
+                  }}
+                />
               </div>
-            );
-          })}
+              <div className="algo-value">{Number(row.value) || 0}</div>
+            </div>
+          ))}
         </div>
-      </div>
+      </section>
 
-      <div className="panel-section">
+      {/* ── Efficiency Meter ── */}
+      {efficiency !== null && (
+        <section className="panel-section efficiency-panel">
+          <h3>Selective Update Efficiency</h3>
+          <div className="efficiency-meter">
+            <div className="efficiency-value">{efficiency}%</div>
+            <div className="efficiency-label">Nodes Skipped</div>
+            <div className="efficiency-bar-track">
+              <div
+                className="efficiency-bar-fill"
+                style={{ width: `${efficiency}%` }}
+              />
+            </div>
+            <div className="efficiency-detail">
+              {stats.reEvaluated} recomputed of {stats.updates * stats.nodes} possible
+            </div>
+          </div>
+        </section>
+      )}
+
+      {/* ── Path Reliability Score ── */}
+      {reliability !== null && (
+        <section className="panel-section reliability-panel">
+          <div className="reliability-row">
+            <span className="reliability-label">Path Reliability</span>
+            <span
+              className="reliability-value"
+              style={{
+                color:
+                  reliability >= 70
+                    ? "#22c55e"
+                    : reliability >= 40
+                    ? "#f59e0b"
+                    : "#ef4444",
+              }}
+            >
+              {reliability}%
+            </span>
+          </div>
+          <div className="reliability-bar-track">
+            <div
+              className="reliability-bar-fill"
+              style={{
+                width: `${reliability}%`,
+                background:
+                  reliability >= 70
+                    ? "linear-gradient(90deg, #22c55e, #4ade80)"
+                    : reliability >= 40
+                    ? "linear-gradient(90deg, #f59e0b, #fbbf24)"
+                    : "linear-gradient(90deg, #ef4444, #f87171)",
+              }}
+            />
+          </div>
+        </section>
+      )}
+
+      <section className="panel-section">
         <h3>Stats</h3>
         <div className="stats-grid">
           <div className="stat-card">
@@ -96,44 +147,19 @@ export default function SidePanel({
             <div className="stat-value">{stats.reEvaluated}</div>
           </div>
         </div>
-      </div>
+      </section>
 
-      <div className="panel-section">
-        <h3>Traffic</h3>
-        <div className="stats-grid">
-          <div className="stat-card">
-            <div className="stat-label">level</div>
-            <div className="stat-value stat-value-traffic">{trafficBadge}</div>
-          </div>
-          <div className="stat-card">
-            <div className="stat-label">avg weight</div>
-            <div className="stat-value">{Number(traffic?.avgEdgeWeight || 0).toFixed(2)}</div>
-          </div>
-          <div className="stat-card">
-            <div className="stat-label">cycles</div>
-            <div className="stat-value">{traffic?.cycles || 0}</div>
-          </div>
-          <div className="stat-card">
-            <div className="stat-label">spt changes</div>
-            <div className="stat-value">{traffic?.sptChanges || 0}</div>
-          </div>
-        </div>
-        <div className="traffic-note">
-          Active edge deltas: {traffic?.activeDeltas || 0} {traffic?.enabled ? "(live)" : "(paused)"}
-        </div>
-      </div>
-
-      <div className="panel-section log-section">
+      <section className="panel-section log-section">
         <h3>Event Log</h3>
         <div className="event-log">
           {log.map((entry) => (
-            <div key={entry.id} className={`log-item ${logKind(entry)}`}>
+            <div key={entry.id} className={logClass(entry.type)}>
               <div className="log-head">{entry.type}</div>
               <div className="log-body">{entry.message}</div>
             </div>
           ))}
         </div>
-      </div>
+      </section>
     </aside>
   );
 }

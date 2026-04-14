@@ -57,7 +57,8 @@ def _largest_connected_component(graph: nx.MultiDiGraph) -> nx.MultiDiGraph:
 def _cluster_nodes(
     graph: nx.MultiDiGraph,
     max_nodes: int,
-) -> Tuple[Dict[int, int], np.ndarray]:
+) -> Tuple[Dict[int, int], np.ndarray, List[List[float]]]:
+    """Return (mapping, centers, node_coords) where node_coords is [[id, lat, lng], ...]."""
     original_ids: List[int] = list(graph.nodes())
 
     coords = np.array(
@@ -73,7 +74,7 @@ def _cluster_nodes(
 
     n_clusters = min(max_nodes, len(original_ids))
     if n_clusters <= 0:
-        return {}, np.zeros((0, 2), dtype=float)
+        return {}, np.zeros((0, 2), dtype=float), []
 
     if n_clusters == len(original_ids):
         labels = np.arange(len(original_ids), dtype=int)
@@ -84,7 +85,23 @@ def _cluster_nodes(
         centers = model.cluster_centers_
 
     mapping = {original_ids[i]: int(labels[i]) for i in range(len(original_ids))}
-    return mapping, centers
+
+    # Compute mean lat/lng per cluster from original OSM nodes.
+    # osmnx stores x = longitude, y = latitude.
+    lat_sums: Dict[int, List[float]] = {c: [] for c in range(n_clusters)}
+    lng_sums: Dict[int, List[float]] = {c: [] for c in range(n_clusters)}
+    for i, node_id in enumerate(original_ids):
+        cluster = int(labels[i])
+        lat_sums[cluster].append(coords[i, 1])   # y = lat
+        lng_sums[cluster].append(coords[i, 0])   # x = lng
+
+    node_coords: List[List[float]] = []
+    for c in range(n_clusters):
+        mean_lat = float(np.mean(lat_sums[c])) if lat_sums[c] else 0.0
+        mean_lng = float(np.mean(lng_sums[c])) if lng_sums[c] else 0.0
+        node_coords.append([c, round(mean_lat, 6), round(mean_lng, 6)])
+
+    return mapping, centers, node_coords
 
 
 def _edge_tuple_iter(graph: nx.MultiDiGraph) -> Iterable[Tuple[int, int, dict]]:
@@ -96,7 +113,7 @@ def build_noida_graph(max_nodes: int = DEFAULT_MAX_NODES) -> Dict[str, object]:
     raw_graph = ox.graph_from_place(PLACE_NAME, network_type="drive", simplify=True)
     graph = _largest_connected_component(raw_graph)
 
-    mapping, centers = _cluster_nodes(graph, max_nodes=max_nodes)
+    mapping, centers, node_coords = _cluster_nodes(graph, max_nodes=max_nodes)
 
     edge_agg: Dict[Tuple[int, int], Dict[str, float]] = {}
     for u, v, data in _edge_tuple_iter(graph):
@@ -140,6 +157,7 @@ def build_noida_graph(max_nodes: int = DEFAULT_MAX_NODES) -> Dict[str, object]:
         "cmd": "init",
         "nodes": int(centers.shape[0]),
         "edges": edges_out,
+        "nodeCoords": node_coords,
     }
     return payload
 
