@@ -3,6 +3,9 @@ import { io } from "socket.io-client";
 import GraphCanvas from "./GraphCanvas";
 import Controls from "./Controls";
 import SidePanel from "./SidePanel";
+import ResizableLayout from "./ResizableLayout";
+import { runAstar, runDijkstraJS } from "./algorithms/astar";
+import { runPrims } from "./algorithms/mst";
 
 const API_BASE = "";
 const SOCKET_BASE =
@@ -172,10 +175,20 @@ export default function App() {
   const [edgeTypes, setEdgeTypes] = useState([]);
   const [baseEdges, setBaseEdges] = useState([]);
   const [edgeModal, setEdgeModal] = useState(null); // { edgeIdx, edgeA, edgeB, currentWeight }
+  const [duelMode, setDuelMode] = useState(false);
+  const [duelData, setDuelData] = useState(null);
+  const [timeOfDay, setTimeOfDay] = useState(null);
+  const [ghostPaths, setGhostPaths] = useState({ fastest: [], safest: [] });
+  const [mstEdges, setMstEdges] = useState([]);
+  const [astarResult, setAstarResult] = useState(null);
+  const [astarTarget, setAstarTarget] = useState(null);
 
+  const duelModeRef = useRef(false);
   const nodesRef = useRef(nodes);
   const edgesRef = useRef(edges);
   const speedRef = useRef(speed);
+  const sourceRef = useRef(source);
+  const riskRef = useRef(risk);
   const dijkstraQueueRef = useRef([]);
   const clearVisitTimerRef = useRef(null);
   const clearFlashTimerRef = useRef(null);
@@ -191,6 +204,18 @@ export default function App() {
   useEffect(() => {
     speedRef.current = speed;
   }, [speed]);
+
+  useEffect(() => {
+    duelModeRef.current = duelMode;
+  }, [duelMode]);
+
+  useEffect(() => {
+    sourceRef.current = source;
+  }, [source]);
+
+  useEffect(() => {
+    riskRef.current = risk;
+  }, [risk]);
 
   useEffect(
     () => () => {
@@ -275,6 +300,9 @@ export default function App() {
     setAlgoResults(INITIAL_RESULTS);
     setSource(0);
     dijkstraQueueRef.current = [];
+    setDuelData(null);
+    setGhostPaths({ fastest: [], safest: [] });
+    setTimeOfDay(null);
   }, []);
 
   const handleCppEvent = useCallback(
@@ -298,6 +326,19 @@ export default function App() {
           const prev = safeArray(event.prev);
           const target = nodesRef.current.length - 1;
           setOptimalPath(buildPath(prev, sourceId, target));
+        }
+
+        if (tag === "ghost_fast") {
+          const gPrev = safeArray(event.prev);
+          const target = nodesRef.current.length - 1;
+          setGhostPaths((gp) => ({ ...gp, fastest: buildPath(gPrev, sourceId, target) }));
+          return;
+        }
+        if (tag === "ghost_safe") {
+          const gPrev = safeArray(event.prev);
+          const target = nodesRef.current.length - 1;
+          setGhostPaths((gp) => ({ ...gp, safest: buildPath(gPrev, sourceId, target) }));
+          return;
         }
 
         setAlgoResults((prev) => {
@@ -342,6 +383,18 @@ export default function App() {
         }
 
         showVisiting(event.affectedNodes);
+
+        // Duel mode: record selective vs full comparison
+        if (duelModeRef.current) {
+          const selNodes = safeArray(event.affectedNodes).map(Number).filter(Number.isInteger);
+          setDuelData({
+            fullCount: nodesRef.current.length,
+            selectiveCount: selNodes.length,
+            selectiveNodes: selNodes,
+            timestamp: Date.now(),
+          });
+        }
+
         setStats((prev) => ({
           ...prev,
           updates: prev.updates + 1,
@@ -523,6 +576,9 @@ export default function App() {
         setAlgoResults(INITIAL_RESULTS);
         setSource(0);
         dijkstraQueueRef.current = [];
+        setDuelData(null);
+        setGhostPaths({ fastest: [], safest: [] });
+        setTimeOfDay(null);
       }
     } catch (err) {
       pushLog({ type: "err", message: err.message });
@@ -591,9 +647,68 @@ export default function App() {
         await queueDijkstraRun("dijkstra", { cmd: "run_dijkstra", source, k: risk });
         await queueDijkstraRun("standard", { cmd: "run_standard", source });
         await postJson("/api/run", { cmd: "run_bellman", source });
+        // Ghost alternate routes
+        queueDijkstraRun("ghost_fast", { cmd: "run_dijkstra", source, k: 0 }).catch(() => {});
+        queueDijkstraRun("ghost_safe", { cmd: "run_dijkstra", source, k: 3 }).catch(() => {});
       } catch (error) {
         pushLog({ type: "err", message: error.message });
       }
+    },
+    [baseEdges, edgeTypes, pushLog, queueDijkstraRun, risk, setEdgesWithRef, source]
+  );
+
+  // ── Feature: Time-of-Day traffic simulation ──────────────────────
+  const timeChangeTimerRef = useRef(null);
+  const onTimeChange = useCallback(
+    (hour) => {
+      setTimeOfDay(hour);
+      if (hour === null || baseEdges.length === 0) return;
+
+      if (timeChangeTimerRef.current) clearTimeout(timeChangeTimerRef.current);
+      timeChangeTimerRef.current = setTimeout(async () => {
+        try {
+          const updates = [];
+          baseEdges.forEach((edge, idx) => {
+            const roadType = edgeTypes[idx] || "secondary";
+            const isMainRoad = roadType === "motorway" || roadType === "primary";
+            const morningPeak = Math.exp(-0.5 * Math.pow((hour - 8.5) / 1.2, 2));
+            const eveningPeak = Math.exp(-0.5 * Math.pow((hour - 17.5) / 1.5, 2));
+            const peakFactor = Math.max(morningPeak, eveningPeak);
+            const nightDip = (hour < 5 || hour > 22) ? 0.4 : 0;
+
+            let wMul, sMul;
+            if (isMainRoad) {
+              wMul = Math.max(0.5, 0.7 + peakFactor * 2.0 - nightDip);
+              sMul = Math.max(0.3, 0.5 + peakFactor * 1.3 - nightDip * 0.5);
+            } else {
+              wMul = Math.max(0.6, 0.8 + peakFactor * 1.3 - nightDip * 0.7);
+              sMul = Math.max(0.3, 0.5 + peakFactor * 0.8 - nightDip * 0.4);
+            }
+
+            const newW = Number((edge.weight * wMul).toFixed(2));
+            const newS = Number(Math.min(2.0, edge.sigma * sMul).toFixed(2));
+            updates.push([idx, newW, newS]);
+          });
+
+          await postJson("/api/batch", { updates, k: risk });
+          const nextEdges = edgesRef.current.map((edge, idx) => {
+            const [, newW, newS] = updates[idx];
+            return { ...edge, weight: newW, sigma: newS, inSPT: false };
+          });
+          setEdgesWithRef(nextEdges);
+          setSptEdges([]);
+          setStats((prev) => ({ ...prev, updates: prev.updates + updates.length }));
+          pushLog({ type: "time", message: `Time set to ${hour.toFixed(1)}h` });
+
+          await queueDijkstraRun("dijkstra", { cmd: "run_dijkstra", source, k: risk });
+          await queueDijkstraRun("standard", { cmd: "run_standard", source });
+          await postJson("/api/run", { cmd: "run_bellman", source });
+          queueDijkstraRun("ghost_fast", { cmd: "run_dijkstra", source, k: 0 }).catch(() => {});
+          queueDijkstraRun("ghost_safe", { cmd: "run_dijkstra", source, k: 3 }).catch(() => {});
+        } catch (error) {
+          pushLog({ type: "err", message: error.message });
+        }
+      }, 500);
     },
     [baseEdges, edgeTypes, pushLog, queueDijkstraRun, risk, setEdgesWithRef, source]
   );
@@ -642,6 +757,9 @@ export default function App() {
       await queueDijkstraRun("dijkstra", { cmd: "run_dijkstra", source, k: risk });
       await queueDijkstraRun("standard", { cmd: "run_standard", source });
       await postJson("/api/run", { cmd: "run_bellman", source });
+      // Ghost alternate routes
+      queueDijkstraRun("ghost_fast", { cmd: "run_dijkstra", source, k: 0 }).catch(() => {});
+      queueDijkstraRun("ghost_safe", { cmd: "run_dijkstra", source, k: 3 }).catch(() => {});
     } catch (error) {
       pushLog({ type: "err", message: error.message });
     }
@@ -655,12 +773,16 @@ export default function App() {
       return;
     }
     const timer = setTimeout(() => {
-      queueDijkstraRun("dijkstra", { cmd: "run_dijkstra", source, k: risk }).catch(() => {});
-      queueDijkstraRun("standard", { cmd: "run_standard", source }).catch(() => {});
-      postJson("/api/run", { cmd: "run_bellman", source }).catch(() => {});
+      const s = sourceRef.current;
+      const k = riskRef.current;
+      queueDijkstraRun("dijkstra", { cmd: "run_dijkstra", source: s, k }).catch(() => {});
+      queueDijkstraRun("standard", { cmd: "run_standard", source: s }).catch(() => {});
+      postJson("/api/run", { cmd: "run_bellman", source: s }).catch(() => {});
+      queueDijkstraRun("ghost_fast", { cmd: "run_dijkstra", source: s, k: 0 }).catch(() => {});
+      queueDijkstraRun("ghost_safe", { cmd: "run_dijkstra", source: s, k: 3 }).catch(() => {});
     }, 400);
     return () => clearTimeout(timer);
-  }, [risk]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [risk, queueDijkstraRun]); // eslint-disable-line react-hooks/exhaustive-deps
 
   // Mark that user has run at least once
   const originalOnRun = onRun;
@@ -779,57 +901,125 @@ export default function App() {
     return Math.max(0, Math.min(100, pct));
   }, [stats.updates, stats.nodes, stats.reEvaluated]);
 
+  // ── Feature: MST Toggle ────────────────────────────────────────
+  const onToggleMst = useCallback(() => {
+    setMstEdges((prev) => {
+      if (prev.length > 0) return []; // toggle off
+      const result = runPrims(nodesRef.current.length, edgesRef.current);
+      pushLog({ type: "mst", message: `Prim's MST: ${result.mstEdgeIndices.length} edges, total weight ${result.totalWeight}` });
+      return result.mstEdgeIndices;
+    });
+  }, [pushLog]);
+
+  // ── Feature: A* Search ─────────────────────────────────────────
+  const onRunAstar = useCallback((target) => {
+    if (target == null || target === source) return;
+    setAstarTarget(target);
+    const result = runAstar(nodesRef.current, edgesRef.current, nodeCoords, source, target);
+    const dijResult = runDijkstraJS(nodesRef.current, edgesRef.current, source, target);
+    setAstarResult({
+      ...result,
+      dijkstraExpanded: dijResult.nodesExpanded,
+      dijkstraPath: dijResult.path,
+    });
+    pushLog({
+      type: "astar",
+      message: `A* → ${result.nodesExpanded} nodes expanded vs Dijkstra ${dijResult.nodesExpanded}`,
+    });
+  }, [nodeCoords, pushLog, source]);
+
+  // ── Node click on map → set as source ──────────────────────────
+  const onNodeClick = useCallback((nodeId) => {
+    setSource(nodeId);
+    pushLog({ type: "source", message: `Source changed to node ${nodeId}` });
+    // Auto-run after source change
+    setTimeout(() => {
+      queueDijkstraRun("dijkstra", { cmd: "run_dijkstra", source: nodeId, k: riskRef.current }).catch(() => {});
+      queueDijkstraRun("standard", { cmd: "run_standard", source: nodeId }).catch(() => {});
+      postJson("/api/run", { cmd: "run_bellman", source: nodeId }).catch(() => {});
+    }, 100);
+  }, [pushLog, queueDijkstraRun]);
+
+  const headerEl = (
+    <header className="topbar">
+      <h1>Dynamic Shortest Path on Probabilistic Graphs</h1>
+      {mapMode && <span className="mode-badge">🗺 Map Mode</span>}
+    </header>
+  );
+
+  const canvasEl = (
+    <GraphCanvas
+      nodes={nodes}
+      edges={edges}
+      sptEdges={sptEdges}
+      visitingNodes={visitingNodes}
+      optimalPath={optimalPath}
+      flashingEdges={flashingEdges}
+      showUncertainty={showUncertainty}
+      mapMode={mapMode}
+      nodeCoords={nodeCoords}
+      onEdgeClick={onEdgeClick}
+      onNodeClick={onNodeClick}
+      duelMode={duelMode}
+      duelData={duelData}
+      ghostPaths={ghostPaths}
+      mstEdges={mstEdges}
+      astarPath={astarResult?.path || []}
+    />
+  );
+
+  const sidebarEl = (
+    <SidePanel
+      algoResults={algoResults}
+      stats={stats}
+      log={log}
+      reliability={reliability}
+      efficiency={efficiency}
+      duelData={duelData}
+      ghostPaths={ghostPaths}
+      risk={risk}
+      astarResult={astarResult}
+      mstEdges={mstEdges}
+      nodes={nodes}
+      edges={edges}
+    />
+  );
+
+  const controlsEl = (
+    <Controls
+      onRun={onRunTracked}
+      onReset={onReset}
+      onSourceChange={setSource}
+      onModeChange={setMode}
+      onRiskChange={setRisk}
+      onSpeedChange={setSpeed}
+      nodes={controlsNodes}
+      source={source}
+      mode={mode}
+      risk={risk}
+      speed={speed}
+      onLoadMap={onLoadOsm}
+      mapMode={mapMode}
+      onTrafficScenario={onTrafficScenario}
+      duelMode={duelMode}
+      onDuelToggle={() => setDuelMode((v) => !v)}
+      timeOfDay={timeOfDay}
+      onTimeChange={onTimeChange}
+      onToggleMst={onToggleMst}
+      mstActive={mstEdges.length > 0}
+      onRunAstar={onRunAstar}
+      astarTarget={astarTarget}
+      onAstarTargetChange={setAstarTarget}
+    />
+  );
+
   return (
-    <div className="app-shell">
-      <header className="topbar">
-        <h1>Dynamic Shortest Path on Probabilistic Graphs</h1>
-      </header>
-
-      <main className="main-grid">
-        <section className="canvas-panel">
-          <GraphCanvas
-            nodes={nodes}
-            edges={edges}
-            sptEdges={sptEdges}
-            visitingNodes={visitingNodes}
-            optimalPath={optimalPath}
-            flashingEdges={flashingEdges}
-            showUncertainty={showUncertainty}
-            mapMode={mapMode}
-            nodeCoords={nodeCoords}
-            onEdgeClick={onEdgeClick}
-          />
-        </section>
-
-        <SidePanel
-          algoResults={algoResults}
-          stats={stats}
-          log={log}
-          reliability={reliability}
-          efficiency={efficiency}
-        />
-      </main>
-
-      <Controls
-        onRun={onRunTracked}
-        onReset={onReset}
-        onEdgeUpdate={onEdgeUpdate}
-        onAdversarial={onAdversarial}
-        onBatch={onBatch}
-        onToggleUncertainty={() => setShowUncertainty((value) => !value)}
-        onSourceChange={setSource}
-        onModeChange={setMode}
-        onRiskChange={setRisk}
-        onSpeedChange={setSpeed}
-        nodes={controlsNodes}
-        source={source}
-        mode={mode}
-        risk={risk}
-        speed={speed}
-        onLoadMap={onLoadOsm}
-        mapMode={mapMode}
-        onMapModeChange={setMapMode}
-        onTrafficScenario={onTrafficScenario}
+    <>
+      <ResizableLayout
+        header={headerEl}
+        canvas={canvasEl}
+        sidebar={sidebarEl}
+        controls={controlsEl}
       />
 
       {/* ── Edge Weight Modal ── */}
@@ -842,7 +1032,7 @@ export default function App() {
           onCancel={() => setEdgeModal(null)}
         />
       )}
-    </div>
+    </>
   );
 }
 

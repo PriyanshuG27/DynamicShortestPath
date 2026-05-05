@@ -97,6 +97,12 @@ export default function GraphCanvas({
   mapMode = false,
   nodeCoords = {},
   onEdgeClick,
+  onNodeClick,
+  duelMode = false,
+  duelData = null,
+  ghostPaths = { fastest: [], safest: [] },
+  mstEdges = [],
+  astarPath = [],
 }) {
   const canvasRef = useRef(null);
   const simulationRef = useRef(null);
@@ -108,6 +114,10 @@ export default function GraphCanvas({
   const mapContainerRef = useRef(null);
   const nodeCoordsRef = useRef(nodeCoords);
   nodeCoordsRef.current = nodeCoords;
+  // Leaflet layer groups for map mode
+  const edgeLayerRef = useRef(null);
+  const nodeLayerRef = useRef(null);
+  const pathLayerRef = useRef(null);
 
   const sptSet = useMemo(() => new Set(sptEdges), [sptEdges]);
   const flashSet = useMemo(() => new Set(flashingEdges), [flashingEdges]);
@@ -169,20 +179,147 @@ export default function GraphCanvas({
 
     leafletMapRef.current = map;
 
-    // Canvas redraws are handled in the animation loop — just invalidate on move/zoom
-    const onMapChange = () => {
-      /* draw loop will pick up new positions automatically */
-    };
-    map.on("move", onMapChange);
-    map.on("zoom", onMapChange);
+    // Create layer groups for graph rendering
+    edgeLayerRef.current = L.layerGroup().addTo(map);
+    nodeLayerRef.current = L.layerGroup().addTo(map);
+    pathLayerRef.current = L.layerGroup().addTo(map);
 
     return () => {
-      map.off("move", onMapChange);
-      map.off("zoom", onMapChange);
       map.remove();
       leafletMapRef.current = null;
+      edgeLayerRef.current = null;
+      nodeLayerRef.current = null;
+      pathLayerRef.current = null;
     };
   }, [mapMode, nodeCoords]);
+
+  const mstSet = useMemo(() => new Set(mstEdges), [mstEdges]);
+
+  // ── Leaflet layer updates (map mode) ────────────────────────────────
+  useEffect(() => {
+    const map = leafletMapRef.current;
+    if (!mapMode || !map || !edgeLayerRef.current) return;
+
+    // Clear existing layers
+    edgeLayerRef.current.clearLayers();
+    nodeLayerRef.current.clearLayers();
+    pathLayerRef.current.clearLayers();
+
+    const maxWeight = edges.reduce((m, e) => Math.max(m, edgeWeight(e)), 1);
+
+    // ── Draw edges ──
+    edges.forEach((edge, idx) => {
+      const ca = nodeCoords[edge.a];
+      const cb = nodeCoords[edge.b];
+      if (!ca || !cb) return;
+
+      const isSpt = sptSet.has(idx);
+      const isFlash = flashSet.has(idx);
+      const isOptimal = optimalEdgeSet.has(edgeKey(edge.a, edge.b));
+      const isMst = mstSet.has(idx);
+
+      const t = Math.min(1, edgeWeight(edge) / maxWeight);
+      const r = Math.round(34 + t * 221);
+      const g = Math.round(197 - t * 128);
+      const bC = Math.round(94 - t * 25);
+      let color = `rgb(${r},${g},${bC})`;
+      let weight = 2 + t * 2;
+      let dashArray = null;
+      let opacity = 0.7;
+
+      if (isSpt) { color = COLOR.edgeSpt; weight += 1; opacity = 0.9; }
+      if (isOptimal) { color = "#60a5fa"; weight += 1.5; opacity = 1; }
+      if (isFlash) { color = COLOR.edgeFlash; weight += 1; opacity = 1; }
+      if (isMst) { color = "#22c55e"; dashArray = "8 5"; weight = 3; opacity = 0.8; }
+
+      const polyline = L.polyline(
+        [[ca.lat, ca.lng], [cb.lat, cb.lng]],
+        { color, weight, opacity, dashArray, className: "graph-edge" }
+      );
+
+      // Edge click for weight editing
+      polyline.on("click", (e) => {
+        L.DomEvent.stopPropagation(e);
+        if (onEdgeClick) onEdgeClick(idx);
+      });
+
+      // Tooltip with weight info
+      polyline.bindTooltip(
+        `Edge ${edge.a}↔${edge.b}<br>Weight: ${edgeWeight(edge).toFixed(1)}<br>σ: ${edgeSigma(edge).toFixed(2)}`,
+        { sticky: true, className: "edge-tooltip" }
+      );
+
+      polyline.addTo(edgeLayerRef.current);
+    });
+
+    // ── Draw ghost paths ──
+    const drawGhost = (path, color) => {
+      if (!path || path.length < 2) return;
+      const latlngs = path.map(id => nodeCoords[id]).filter(Boolean).map(c => [c.lat, c.lng]);
+      if (latlngs.length < 2) return;
+      L.polyline(latlngs, { color, weight: 3, opacity: 0.35, dashArray: "6 8" })
+        .addTo(pathLayerRef.current);
+    };
+    drawGhost(ghostPaths.fastest, "#f97316");
+    drawGhost(ghostPaths.safest, "#a855f7");
+
+    // ── Draw A* path ──
+    if (astarPath.length > 1) {
+      const latlngs = astarPath.map(id => nodeCoords[id]).filter(Boolean).map(c => [c.lat, c.lng]);
+      if (latlngs.length > 1) {
+        L.polyline(latlngs, { color: "#fbbf24", weight: 4, opacity: 0.85, dashArray: "10 6" })
+          .addTo(pathLayerRef.current);
+      }
+    }
+
+    // ── Draw optimal path ──
+    if (optimalPath.length > 1) {
+      const latlngs = optimalPath.map(id => nodeCoords[id]).filter(Boolean).map(c => [c.lat, c.lng]);
+      if (latlngs.length > 1) {
+        L.polyline(latlngs, { color: COLOR.edgePath, weight: 5, opacity: 0.9, dashArray: "8 6" })
+          .addTo(pathLayerRef.current);
+      }
+    }
+
+    // ── Draw nodes ──
+    nodes.forEach((node) => {
+      const c = nodeCoords[node.id];
+      if (!c) return;
+
+      const isVisiting = visitingSet.has(node.id);
+      const isOnPath = optimalPath.includes(node.id);
+
+      let fillColor = "#1e293b";
+      let borderColor = COLOR.nodeBorder;
+      let radius = 8;
+      if (isOnPath) { fillColor = "#0e4a5c"; borderColor = "#2dd4bf"; radius = 10; }
+      if (isVisiting) { fillColor = "#7c6ef7"; borderColor = "#a78bfa"; radius = 11; }
+
+      const marker = L.circleMarker([c.lat, c.lng], {
+        radius,
+        fillColor,
+        color: borderColor,
+        weight: 2,
+        fillOpacity: 0.9,
+      });
+
+      const label = node.label || `Node ${node.id}`;
+      const distText = Number.isFinite(node.dist) ? node.dist.toFixed(1) : "∞";
+
+      marker.bindTooltip(
+        `<b>${label}</b><br>Dist: ${distText}`,
+        { direction: "top", offset: [0, -10], className: "node-tooltip" }
+      );
+
+      marker.on("click", () => {
+        if (onNodeClick) onNodeClick(node.id);
+      });
+
+      marker.addTo(nodeLayerRef.current);
+    });
+
+  }, [mapMode, nodes, edges, nodeCoords, sptSet, flashSet, optimalEdgeSet, visitingSet,
+      optimalPath, ghostPaths, mstSet, astarPath, onEdgeClick, onNodeClick]);
 
   // ── D3 force simulation (demo mode only) ──────────────────────────
   useEffect(() => {
@@ -518,6 +655,31 @@ export default function GraphCanvas({
         return true;
       });
 
+      // ── Ghost alternate routes ─────────────────────────────────
+      const drawGhostPath = (path, color) => {
+        if (!path || path.length < 2) return;
+        ctx.save();
+        ctx.strokeStyle = color;
+        ctx.lineWidth = 2.5;
+        ctx.globalAlpha = 0.3;
+        ctx.setLineDash([6, 8]);
+        let started = false;
+        ctx.beginPath();
+        for (const nodeId of path) {
+          const pos = getPos(nodeId);
+          const node = nodeById.get(nodeId);
+          const px = pos?.x ?? node?.x;
+          const py = pos?.y ?? node?.y;
+          if (!Number.isFinite(px) || !Number.isFinite(py)) continue;
+          if (!started) { ctx.moveTo(px, py); started = true; }
+          else { ctx.lineTo(px, py); }
+        }
+        if (started) ctx.stroke();
+        ctx.restore();
+      };
+      drawGhostPath(ghostPaths.fastest, "#f97316"); // orange
+      drawGhostPath(ghostPaths.safest, "#a855f7");  // purple
+
       // ── Optimal path overlay ───────────────────────────────────
       if (optimalPath.length > 1) {
         ctx.save();
@@ -551,6 +713,46 @@ export default function GraphCanvas({
       }
 
       frameRef.current = requestAnimationFrame(draw);
+
+      // ── Duel wave animation ────────────────────────────────────
+      if (duelMode && duelData && duelData.timestamp) {
+        const elapsed = performance.now() - duelData.timestamp;
+        if (elapsed < 2000) {
+          const progress = elapsed / 2000;
+          const fadeAlpha = 1 - progress;
+
+          // Red wave: all nodes (what full Dijkstra would touch)
+          for (const node of graph.nodes) {
+            const pos = getPos(node.id) || { x: node.x, y: node.y };
+            if (!Number.isFinite(pos.x) || !Number.isFinite(pos.y)) continue;
+            const waveRadius = (mapMode ? NODE_RADIUS_MAP : NODE_RADIUS) + 6 + progress * 28;
+            ctx.beginPath();
+            ctx.arc(pos.x, pos.y, waveRadius, 0, Math.PI * 2);
+            ctx.strokeStyle = `rgba(239, 68, 68, ${(fadeAlpha * 0.4).toFixed(3)})`;
+            ctx.lineWidth = 2;
+            ctx.stroke();
+          }
+
+          // Green ripple: only selective nodes
+          const selSet = new Set(duelData.selectiveNodes || []);
+          for (const node of graph.nodes) {
+            if (!selSet.has(node.id)) continue;
+            const pos = getPos(node.id) || { x: node.x, y: node.y };
+            if (!Number.isFinite(pos.x) || !Number.isFinite(pos.y)) continue;
+            const greenRadius = (mapMode ? NODE_RADIUS_MAP : NODE_RADIUS) + 4 + progress * 18;
+            ctx.beginPath();
+            ctx.arc(pos.x, pos.y, greenRadius, 0, Math.PI * 2);
+            ctx.strokeStyle = `rgba(34, 197, 94, ${(fadeAlpha * 0.8).toFixed(3)})`;
+            ctx.lineWidth = 3;
+            ctx.stroke();
+            // Green fill
+            ctx.beginPath();
+            ctx.arc(pos.x, pos.y, greenRadius * 0.6, 0, Math.PI * 2);
+            ctx.fillStyle = `rgba(34, 197, 94, ${(fadeAlpha * 0.15).toFixed(3)})`;
+            ctx.fill();
+          }
+        }
+      }
     };
 
     frameRef.current = requestAnimationFrame(draw);
@@ -559,7 +761,7 @@ export default function GraphCanvas({
         cancelAnimationFrame(frameRef.current);
       }
     };
-  }, [flashSet, mapMode, nodeCoords, optimalEdgeSet, optimalPath, showUncertainty, sptSet, visitingSet]);
+  }, [duelMode, duelData, flashSet, ghostPaths, mapMode, nodeCoords, optimalEdgeSet, optimalPath, showUncertainty, sptSet, visitingSet]);
 
   // ── Edge click detection ──────────────────────────────────────
   const handleCanvasClick = useCallback(
@@ -626,17 +828,17 @@ export default function GraphCanvas({
       )}
       <canvas
         ref={canvasRef}
-        onClick={handleCanvasClick}
+        onClick={!mapMode ? handleCanvasClick : undefined}
         style={{
           position: "absolute",
           inset: 0,
-          zIndex: 1,
+          zIndex: mapMode ? -1 : 1,
           width: "100%",
           height: "100%",
-          display: "block",
+          display: mapMode ? "none" : "block",
           cursor: "crosshair",
           background: mapMode ? "transparent" : "#09090b",
-          pointerEvents: "auto",
+          pointerEvents: mapMode ? "none" : "auto",
         }}
       />
     </div>

@@ -6,6 +6,12 @@ const BAR_COLORS = {
   bellman: "#f59e0b",
 };
 
+const COMPLEXITY = {
+  dijkstra: "O(E log V)",
+  standard: "O(E log V)",
+  bellman: "O(V·E)",
+};
+
 function barPercent(value, maxValue) {
   if (maxValue <= 0) {
     return 0;
@@ -24,7 +30,20 @@ function logClass(type) {
   return "log-item";
 }
 
-export default function SidePanel({ algoResults, stats, log, reliability, efficiency }) {
+export default function SidePanel({
+  algoResults,
+  stats,
+  log,
+  reliability,
+  efficiency,
+  duelData,
+  ghostPaths,
+  risk,
+  astarResult,
+  mstEdges,
+  nodes,
+  edges,
+}) {
   const rows = useMemo(
     () => [
       {
@@ -48,14 +67,33 @@ export default function SidePanel({ algoResults, stats, log, reliability, effici
 
   const maxValue = Math.max(1, ...rows.map((row) => Number(row.value) || 0));
 
+  // Duel display data
+  const duelSaved = duelData
+    ? Math.round(((duelData.fullCount - duelData.selectiveCount) / Math.max(1, duelData.fullCount)) * 100)
+    : null;
+
+  // MST total weight
+  const mstTotalWeight = useMemo(() => {
+    if (!mstEdges || mstEdges.length === 0 || !edges) return null;
+    let total = 0;
+    for (const idx of mstEdges) {
+      if (edges[idx]) total += Number(edges[idx].weight) || 0;
+    }
+    return Math.round(total * 100) / 100;
+  }, [mstEdges, edges]);
+
   return (
     <aside className="side-panel">
+      {/* ── Algorithm Comparison with Complexity ── */}
       <section className="panel-section">
         <h3>Algorithm Comparison</h3>
         <div className="algo-rows">
           {rows.map((row) => (
             <div className="algo-row" key={row.key}>
-              <div className="algo-label">{row.label}</div>
+              <div className="algo-label">
+                {row.label}
+                <span className="algo-complexity">{COMPLEXITY[row.key]}</span>
+              </div>
               <div className="algo-bar-track">
                 <div
                   className="algo-bar-fill"
@@ -69,7 +107,125 @@ export default function SidePanel({ algoResults, stats, log, reliability, effici
             </div>
           ))}
         </div>
+        <div className="complexity-note">
+          Values show actual edge relaxation count. Selective update: <b>O(k·ΔE)</b> — only recomputes affected nodes.
+        </div>
       </section>
+
+      {/* ── A* Search Result ── */}
+      {astarResult && (
+        <section className="panel-section astar-panel">
+          <h3>⭐ A* vs Dijkstra</h3>
+          <div className="astar-comparison">
+            <div className="astar-col">
+              <div className="astar-count" style={{ color: "#fbbf24" }}>
+                {astarResult.nodesExpanded}
+              </div>
+              <div className="astar-label">A* Expanded</div>
+            </div>
+            <div className="astar-vs">vs</div>
+            <div className="astar-col">
+              <div className="astar-count" style={{ color: "#7c6ef7" }}>
+                {astarResult.dijkstraExpanded}
+              </div>
+              <div className="astar-label">Dijkstra Expanded</div>
+            </div>
+          </div>
+          {astarResult.dijkstraExpanded > 0 && (
+            <div className="astar-saved">
+              A* saved{" "}
+              {Math.round(
+                ((astarResult.dijkstraExpanded - astarResult.nodesExpanded) /
+                  astarResult.dijkstraExpanded) *
+                  100
+              )}
+              % node evaluations
+            </div>
+          )}
+          <div className="astar-formula">
+            f(n) = g(n) + h(n) where h = haversine distance to target
+          </div>
+        </section>
+      )}
+
+      {/* ── MST Info ── */}
+      {mstEdges && mstEdges.length > 0 && (
+        <section className="panel-section mst-panel">
+          <h3>🌲 Minimum Spanning Tree</h3>
+          <div className="mst-stats">
+            <div className="mst-stat">
+              <span className="mst-stat-label">MST Edges</span>
+              <span className="mst-stat-value">{mstEdges.length}</span>
+            </div>
+            <div className="mst-stat">
+              <span className="mst-stat-label">Total Weight</span>
+              <span className="mst-stat-value">{mstTotalWeight}</span>
+            </div>
+          </div>
+          <div className="mst-note">
+            Prim's algorithm (Greedy) — O(E log V). MST minimizes total edge weight; SPT minimizes distance from source.
+          </div>
+        </section>
+      )}
+
+      {/* ── Algorithm Duel Result ── */}
+      {duelData && (
+        <section className="panel-section duel-panel">
+          <h3>⚔ Algorithm Duel</h3>
+          <div className="duel-comparison">
+            <div className="duel-col duel-full">
+              <div className="duel-count">{duelData.fullCount}</div>
+              <div className="duel-label">Full Dijkstra</div>
+              <div className="duel-bar-track">
+                <div className="duel-bar-fill duel-bar-red" style={{ width: "100%" }} />
+              </div>
+            </div>
+            <div className="duel-vs">vs</div>
+            <div className="duel-col duel-selective">
+              <div className="duel-count">{duelData.selectiveCount}</div>
+              <div className="duel-label">Selective</div>
+              <div className="duel-bar-track">
+                <div
+                  className="duel-bar-fill duel-bar-green"
+                  style={{ width: `${Math.max(4, barPercent(duelData.selectiveCount, duelData.fullCount))}%` }}
+                />
+              </div>
+            </div>
+          </div>
+          <div className="duel-saved">{duelSaved}% computation saved</div>
+        </section>
+      )}
+
+      {/* ── Route Alternatives Legend ── */}
+      {(ghostPaths?.fastest?.length > 1 || ghostPaths?.safest?.length > 1) && (
+        <section className="panel-section ghost-legend">
+          <h3>Route Alternatives</h3>
+          <div className="ghost-rows">
+            {ghostPaths.fastest.length > 1 && (
+              <div className="ghost-row">
+                <span className="ghost-swatch" style={{ background: "#f97316" }} />
+                <span className="ghost-text">Fastest (k=0)</span>
+              </div>
+            )}
+            <div className="ghost-row">
+              <span className="ghost-swatch" style={{ background: "#60a5fa" }} />
+              <span className="ghost-text">Current (k={Number(risk).toFixed(1)})</span>
+            </div>
+            {ghostPaths.safest.length > 1 && (
+              <div className="ghost-row">
+                <span className="ghost-swatch" style={{ background: "#a855f7" }} />
+                <span className="ghost-text">Safest (k=3)</span>
+              </div>
+            )}
+            {astarResult?.path?.length > 1 && (
+              <div className="ghost-row">
+                <span className="ghost-swatch" style={{ background: "#fbbf24" }} />
+                <span className="ghost-text">A* path</span>
+              </div>
+            )}
+          </div>
+        </section>
+      )}
 
       {/* ── Efficiency Meter ── */}
       {efficiency !== null && (
