@@ -18,10 +18,8 @@ function formatHour(h) {
 }
 
 function timeEmoji(h) {
-  if (h < 5 || h >= 22) return "🌙";
-  if (h < 7) return "🌅";
-  if (h < 17) return "☀️";
-  return "🌆";
+  // Removing emojis for a cleaner, cinematic aesthetic
+  return "";
 }
 
 export default function Controls({
@@ -54,23 +52,23 @@ export default function Controls({
       {/* Row 1: Primary actions */}
       <div className="controls-row controls-row-2">
         <button className="ctl-btn ctl-run" onClick={onRun}>
-          ▶ Run Algorithm
+          Run Algorithm
         </button>
         <button className="ctl-btn" onClick={onReset}>
-          ↺ Reset
+          Reset Grid
         </button>
       </div>
 
       {/* Row 2: Map + DAA features */}
       <div className="controls-row controls-row-3">
         <button className="ctl-btn ctl-map" onClick={onLoadMap}>
-          🗺 Load Noida Map
+          Load Map Data
         </button>
         <button
           className={`ctl-btn ctl-mst ${mstActive ? "active" : ""}`}
           onClick={onToggleMst}
         >
-          🌲 {mstActive ? "Hide MST" : "Show MST"}
+          {mstActive ? "Hide MST" : "Show MST"}
         </button>
         {mapMode && (
           <button
@@ -80,7 +78,7 @@ export default function Controls({
               onRunAstar(t);
             }}
           >
-            ⭐ Run A*
+            Run A* Heuristic
           </button>
         )}
       </div>
@@ -111,25 +109,25 @@ export default function Controls({
               className="ctl-btn ctl-traffic rush"
               onClick={() => onTrafficScenario("rush_hour")}
             >
-              🚗 Rush Hour
+              Rush Hour
             </button>
             <button
               className="ctl-btn ctl-traffic rain"
               onClick={() => onTrafficScenario("rain")}
             >
-              🌧 Rain
+              Rain
             </button>
             <button
               className="ctl-btn ctl-traffic roadwork"
               onClick={() => onTrafficScenario("roadwork")}
             >
-              🚧 Roadwork
+              Roadwork
             </button>
             <button
               className="ctl-btn ctl-traffic clear"
               onClick={() => onTrafficScenario("clear")}
             >
-              ✅ Clear
+              Clear Traffic
             </button>
           </div>
 
@@ -139,14 +137,14 @@ export default function Controls({
               className={`ctl-btn ctl-duel ${duelMode ? "active" : ""}`}
               onClick={onDuelToggle}
             >
-              ⚔ Algorithm Duel {duelMode ? "ON" : "OFF"}
+              Algorithm Duel {duelMode ? "ON" : "OFF"}
             </button>
           </div>
 
           {/* 24-Hour Timeline Scrubber */}
           <div className="control-block timeline-block">
             <div className="block-title">
-              {timeEmoji(timeOfDay ?? 12)} 24-Hour Timeline
+              24-Hour Timeline
               {timeOfDay !== null && (
                 <span className="timeline-time">{formatHour(timeOfDay)}</span>
               )}
@@ -170,7 +168,7 @@ export default function Controls({
           </div>
 
           <div className="edge-hint">
-            💡 Click any node to set it as source · Click any edge to edit weight
+            Click any node to set it as source · Click any edge to edit weight
           </div>
         </>
       )}

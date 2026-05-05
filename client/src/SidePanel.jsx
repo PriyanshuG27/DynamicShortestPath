@@ -247,6 +247,35 @@ export default function SidePanel({
         </section>
       )}
 
+      {/* ── Node Evaluation Visualizer ── */}
+      {duelData && nodes && nodes.length > 0 && nodes.length <= 50 && (
+        <section className="panel-section node-eval-panel">
+          <h3>Evaluated vs Skipped Nodes</h3>
+          <div className="node-eval-stats">
+            <div>Evaluated: <span>{duelData.selectiveCount}</span></div>
+            <div>Skipped: <span>{duelData.fullCount - duelData.selectiveCount}</span></div>
+          </div>
+          <div className="node-grid">
+            {nodes.map(node => {
+              const isEvaluated = duelData.selectiveNodes && duelData.selectiveNodes.includes(node.id);
+              const label = node.label && node.label.length <= 4 
+                 ? node.label 
+                 : (node.id < 26 ? String.fromCharCode(65 + node.id) : node.id);
+                 
+              return (
+                <div 
+                  key={node.id} 
+                  className={`node-pill ${isEvaluated ? "evaluated" : "skipped"}`}
+                  title={node.label || `Node ${node.id}`}
+                >
+                  {label}
+                </div>
+              );
+            })}
+          </div>
+        </section>
+      )}
+
       {/* ── Path Reliability Score ── */}
       {reliability !== null && (
         <section className="panel-section reliability-panel">

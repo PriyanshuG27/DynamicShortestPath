@@ -276,7 +276,11 @@ export default function GraphCanvas({
     if (optimalPath.length > 1) {
       const latlngs = optimalPath.map(id => nodeCoords[id]).filter(Boolean).map(c => [c.lat, c.lng]);
       if (latlngs.length > 1) {
-        L.polyline(latlngs, { color: COLOR.edgePath, weight: 5, opacity: 0.9, dashArray: "8 6" })
+        // Glowing backdrop for high visibility
+        L.polyline(latlngs, { color: COLOR.edgePath, weight: 12, opacity: 0.3 })
+          .addTo(pathLayerRef.current);
+        // Main solid path
+        L.polyline(latlngs, { color: COLOR.edgePath, weight: 6, opacity: 1 })
           .addTo(pathLayerRef.current);
       }
     }
@@ -683,9 +687,13 @@ export default function GraphCanvas({
       // ── Optimal path overlay ───────────────────────────────────
       if (optimalPath.length > 1) {
         ctx.save();
+        // High visibility glow
+        ctx.shadowColor = COLOR.edgePath;
+        ctx.shadowBlur = 16;
         ctx.strokeStyle = COLOR.edgePath;
-        ctx.lineWidth = 3;
-        ctx.setLineDash([8, 6]);
+        ctx.lineWidth = 6;
+        ctx.lineJoin = "round";
+        ctx.lineCap = "round";
 
         let started = false;
         ctx.beginPath();
