@@ -39,7 +39,7 @@ export default function Controls({
   timeOfDay,
   onTimeChange,
   onToggleMst,
-  mstActive,
+  mstType,
   onRunAstar,
   onStartStep,
   onStepForward,
@@ -48,6 +48,11 @@ export default function Controls({
   stepPlaying,
   onChainAttack,
   onCopySummary,
+  onInjectNegativeCycle,
+  onRaceMode,
+  optimalPath,
+  onRunComplexityTest,
+  complexityRunning,
 }) {
   return (
     <section className="controls-panel">
@@ -86,12 +91,6 @@ export default function Controls({
         <button className="ctl-btn ctl-map" onClick={onLoadMap}>
           Load Map Data
         </button>
-        <button
-          className={`ctl-btn ctl-mst ${mstActive ? "active" : ""}`}
-          onClick={onToggleMst}
-        >
-          {mstActive ? "Hide MST" : "Show MST"}
-        </button>
         {mapMode && (
           <button
             className="ctl-btn ctl-astar"
@@ -100,6 +99,36 @@ export default function Controls({
             Run A* Heuristic
           </button>
         )}
+        {!mapMode && (
+          <button
+            className="ctl-btn ctl-neg-cycle"
+            onClick={onInjectNegativeCycle}
+          >
+            Inject Negative Cycle
+          </button>
+        )}
+      </div>
+
+      {/* Row 4: MST buttons */}
+      <div className="controls-row mst-btn-group">
+        <button
+          className={`ctl-btn ctl-mst-prim ${mstType === "prim" || mstType === "both" ? "active" : ""}`}
+          onClick={() => onToggleMst("prim")}
+        >
+          Prim's MST
+        </button>
+        <button
+          className={`ctl-btn ctl-mst-kruskal ${mstType === "kruskal" || mstType === "both" ? "active" : ""}`}
+          onClick={() => onToggleMst("kruskal")}
+        >
+          Kruskal's MST
+        </button>
+        <button
+          className={`ctl-btn ctl-mst-both ${mstType === "both" ? "active" : ""}`}
+          onClick={() => onToggleMst("both")}
+        >
+          Compare Both
+        </button>
       </div>
 
       {/* Source & Destination selectors */}
@@ -199,7 +228,7 @@ export default function Controls({
             </button>
           </div>
 
-          {/* Duel Mode + Chain Attack */}
+          {/* Duel Mode + Chain Attack + Algorithm Race */}
           <div className="controls-row controls-row-2">
             <button
               className={`ctl-btn ctl-duel ${duelMode ? "active" : ""}`}
@@ -243,6 +272,25 @@ export default function Controls({
           </div>
         </>
       )}
+
+      {/* Algorithm Race button */}
+      <div className="controls-row controls-row-2">
+        <button
+          className="ctl-btn ctl-race"
+          onClick={onRaceMode}
+          disabled={!optimalPath || optimalPath.length === 0}
+          title={(!optimalPath || optimalPath.length === 0) ? "Run an algorithm first" : "Race selective vs full Dijkstra"}
+        >
+          Algorithm Race
+        </button>
+        <button
+          className={`ctl-btn ctl-complexity ${complexityRunning ? "active" : ""}`}
+          onClick={onRunComplexityTest}
+          disabled={complexityRunning}
+        >
+          {complexityRunning ? "Running..." : "Complexity Test"}
+        </button>
+      </div>
 
       {/* Mode toggle */}
       <div className="control-block">

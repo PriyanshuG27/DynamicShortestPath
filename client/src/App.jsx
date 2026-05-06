@@ -5,8 +5,9 @@ import Controls from "./Controls";
 import SidePanel from "./SidePanel";
 import ResizableLayout from "./ResizableLayout";
 import { runAstar, runDijkstraJS } from "./algorithms/astar";
-import { runPrims } from "./algorithms/mst";
+import { runPrims, runKruskal } from "./algorithms/mst";
 import { dijkstraStepGenerator, STEP_DONE } from "./algorithms/dijkstraStep";
+import { measureDijkstra, measurePrims } from "./algorithms/complexity";
 
 const API_BASE = "";
 const SOCKET_BASE =
@@ -188,6 +189,24 @@ export default function App() {
   const [stepState, setStepState] = useState(null);
   const [stepPlaying, setStepPlaying] = useState(false);
   const [stepFrontier, setStepFrontier] = useState([]);
+  // Feature 1: Node Skip Table
+  const [skipTableData, setSkipTableData] = useState(null);
+  // Feature 2: Negative Cycle Injection
+  const [injectedNegEdge, setInjectedNegEdge] = useState(null);
+  const [negCycleEdges, setNegCycleEdges] = useState([]);
+  // Feature 3: Kruskal MST
+  const [kruskalEdges, setKruskalEdges] = useState([]);
+  const [mstType, setMstType] = useState("none"); // "none"|"prim"|"kruskal"|"both"
+
+  // Feature: Algorithm Race
+  const [raceData, setRaceData] = useState(null);
+  const [raceHistory, setRaceHistory] = useState([]);
+
+  // Feature: Amortized Cost Tracker
+  const [updateHistory, setUpdateHistory] = useState([]);
+
+  // Feature: Empirical Complexity Analysis
+  const [complexityData, setComplexityData] = useState({ dijkstra: [], prims: [], running: false });
 
   const duelModeRef = useRef(false);
   const nodesRef = useRef(nodes);
@@ -199,9 +218,11 @@ export default function App() {
   const clearVisitTimerRef = useRef(null);
   const clearFlashTimerRef = useRef(null);
   const mstActiveRef = useRef(false);
+  const kruskalActiveRef = useRef(false);
   const stepGenRef = useRef(null);
   const stepPlayTimerRef = useRef(null);
   const destinationRef = useRef(destination);
+  const updateHistoryRef = useRef([]);
 
   useEffect(() => {
     nodesRef.current = nodes;
@@ -317,6 +338,11 @@ export default function App() {
     setDuelData(null);
     setGhostPaths({ fastest: [], safest: [] });
     setTimeOfDay(null);
+    setRaceData(null);
+    setRaceHistory([]);
+    setUpdateHistory([]);
+    updateHistoryRef.current = [];
+    setComplexityData({ dijkstra: [], prims: [], running: false });
   }, []);
 
   const handleCppEvent = useCallback(
@@ -370,6 +396,9 @@ export default function App() {
       }
 
       if (eventType === "edge_update") {
+        // Feature 1: Snapshot distances BEFORE applying update
+        const prevDistSnapshot = nodesRef.current.map(n => ({ id: n.id, dist: n.dist }));
+
         const edgeIdx = Number(event.edgeIdx);
         if (Number.isInteger(edgeIdx) && edgeIdx >= 0 && edgeIdx < edgesRef.current.length) {
           const nextEdges = edgesRef.current.map((edge, idx) =>
@@ -396,6 +425,30 @@ export default function App() {
           applyDistances(event.dist);
         }
 
+        // Feature 1: Compute skip table data after distances applied
+        const affectedSet = new Set(safeArray(event.affectedNodes).map(Number));
+        const newDistArr = safeArray(event.dist);
+        if (newDistArr.length > 0) {
+          const tableRows = prevDistSnapshot.map(snap => {
+            const newDist = Number(newDistArr[snap.id]);
+            const nd = Number.isFinite(newDist) ? newDist : Infinity;
+            const od = Number.isFinite(snap.dist) ? snap.dist : Infinity;
+            const delta = Number.isFinite(nd) && Number.isFinite(od) ? nd - od : null;
+            const isRecomputed = affectedSet.has(snap.id);
+            const noChange = isRecomputed && delta !== null && Math.abs(delta) < 0.001;
+            const nodeObj = nodesRef.current.find(n => n.id === snap.id);
+            return {
+              id: snap.id,
+              label: nodeObj?.label || `N${snap.id}`,
+              status: isRecomputed ? (noChange ? "RECOMPUTED_NO_CHANGE" : "RECOMPUTED") : "SKIPPED",
+              oldDist: od,
+              newDist: nd,
+              delta,
+            };
+          });
+          setSkipTableData(tableRows);
+        }
+
         showVisiting(event.affectedNodes);
 
         // Duel mode: record selective vs full comparison
@@ -415,10 +468,28 @@ export default function App() {
           reEvaluated: prev.reEvaluated + toNumberOr(event.nodesRecomputed, 0),
         }));
 
-        // Auto-refresh MST if currently visible
+        // Feature: Amortized Cost Tracker — record this update
+        {
+          const entry = {
+            updateIndex: updateHistoryRef.current.length + 1,
+            nodesRecomputed: toNumberOr(event.nodesRecomputed, 0),
+            totalNodes: nodesRef.current.length,
+            timestamp: Date.now(),
+            isAdversarial: false,
+          };
+          const next = [...updateHistoryRef.current, entry].slice(-20);
+          updateHistoryRef.current = next;
+          setUpdateHistory(next);
+        }
+
+        // Auto-refresh MST/Kruskal if currently visible
         if (mstActiveRef.current) {
           const result = runPrims(nodesRef.current.length, edgesRef.current);
           setMstEdges(result.mstEdgeIndices);
+        }
+        if (kruskalActiveRef.current) {
+          const result = runKruskal(nodesRef.current.length, edgesRef.current);
+          setKruskalEdges(result.mstEdgeIndices);
         }
         return;
       }
@@ -445,6 +516,20 @@ export default function App() {
         }
 
         setStats((prev) => ({ ...prev, updates: prev.updates + 1 }));
+
+        // Feature: Amortized Cost Tracker — adversarial update
+        {
+          const entry = {
+            updateIndex: updateHistoryRef.current.length + 1,
+            nodesRecomputed: 2, // adversarial touches 2 endpoint nodes minimum
+            totalNodes: nodesRef.current.length,
+            timestamp: Date.now(),
+            isAdversarial: true,
+          };
+          const next = [...updateHistoryRef.current, entry].slice(-20);
+          updateHistoryRef.current = next;
+          setUpdateHistory(next);
+        }
 
         // Bug 2 fix: track duel data for adversarial updates
         if (duelModeRef.current) {
@@ -487,10 +572,14 @@ export default function App() {
 
         setStats((prev) => ({ ...prev, updates: prev.updates + 1 }));
 
-        // Auto-refresh MST if currently visible
+        // Auto-refresh MST/Kruskal if currently visible
         if (mstActiveRef.current) {
           const result = runPrims(nodesRef.current.length, edgesRef.current);
           setMstEdges(result.mstEdgeIndices);
+        }
+        if (kruskalActiveRef.current) {
+          const result = runKruskal(nodesRef.current.length, edgesRef.current);
+          setKruskalEdges(result.mstEdgeIndices);
         }
         return;
       }
@@ -513,10 +602,14 @@ export default function App() {
           });
         }
 
-        // Auto-refresh MST if currently visible
+        // Auto-refresh MST/Kruskal if currently visible
         if (mstActiveRef.current) {
           const result = runPrims(nodesRef.current.length, edgesRef.current);
           setMstEdges(result.mstEdgeIndices);
+        }
+        if (kruskalActiveRef.current) {
+          const result = runKruskal(nodesRef.current.length, edgesRef.current);
+          setKruskalEdges(result.mstEdgeIndices);
         }
         return;
       }
@@ -854,7 +947,6 @@ export default function App() {
   const onReset = useCallback(async () => {
     try {
       if (mapMode && baseEdges.length > 0) {
-        // Bug 4 fix: reset locally from baseEdges — no onLoadOsm(), no map flicker
         const resetEdges = baseEdges.map((e) => ({ ...e, inSPT: false }));
         setEdgesWithRef(resetEdges);
         setSptEdges([]);
@@ -868,7 +960,6 @@ export default function App() {
         setTimeOfDay(null);
         setMstEdges([]);
         mstActiveRef.current = false;
-        // Re-init C++ with base edges
         const edgeTuples = baseEdges.map((e) => [e.a, e.b, e.weight, e.sigma]);
         await postJson("/api/run", { cmd: "init", nodes: nodesRef.current.length, edges: edgeTuples });
         pushLog({ type: "reset", message: "Map graph reset to base weights" });
@@ -877,6 +968,18 @@ export default function App() {
         resetLocalGraph();
         pushLog({ type: "reset", message: "Demo graph reset" });
       }
+      // Clear all new feature state on reset
+      setSkipTableData(null);
+      setInjectedNegEdge(null);
+      setNegCycleEdges([]);
+      setKruskalEdges([]);
+      kruskalActiveRef.current = false;
+      setMstType("none");
+      setRaceData(null);
+      setRaceHistory([]);
+      setUpdateHistory([]);
+      updateHistoryRef.current = [];
+      setComplexityData({ dijkstra: [], prims: [], running: false });
     } catch (error) {
       pushLog({ type: "err", message: error.message });
     }
@@ -976,19 +1079,108 @@ export default function App() {
     return Math.max(0, Math.min(100, pct));
   }, [stats.updates, stats.nodes, stats.reEvaluated]);
 
-  // ── Feature: MST Toggle ────────────────────────────────────────
-  const onToggleMst = useCallback(() => {
-    setMstEdges((prev) => {
-      if (prev.length > 0) {
-        mstActiveRef.current = false;
-        return []; // toggle off
+  // Feature 4: SPT vs MST Divergence
+  const divergenceData = useMemo(() => {
+    const activeMst = mstEdges.length > 0 ? mstEdges : kruskalEdges;
+    if (sptEdges.length === 0 || activeMst.length === 0) return null;
+    const sptS = new Set(sptEdges);
+    const mstS = new Set(activeMst);
+    return {
+      sptOnly: sptEdges.filter(i => !mstS.has(i)),
+      mstOnly: activeMst.filter(i => !sptS.has(i)),
+      inBoth: sptEdges.filter(i => mstS.has(i)),
+    };
+  }, [sptEdges, mstEdges, kruskalEdges]);
+
+  // ── Feature: MST Toggle (Prim / Kruskal / Both) ────────────────
+  const onToggleMst = useCallback((type = "prim") => {
+    if (type === "prim") {
+      if (mstType === "prim") {
+        // toggle off
+        setMstEdges([]); mstActiveRef.current = false;
+        setMstType("none");
+        return;
       }
-      mstActiveRef.current = true;
+      mstActiveRef.current = true; kruskalActiveRef.current = false;
       const result = runPrims(nodesRef.current.length, edgesRef.current);
-      pushLog({ type: "mst", message: `Prim's MST: ${result.mstEdgeIndices.length} edges, total weight ${result.totalWeight}` });
-      return result.mstEdgeIndices;
-    });
-  }, [pushLog]);
+      setMstEdges(result.mstEdgeIndices); setKruskalEdges([]);
+      setMstType("prim");
+      pushLog({ type: "mst", message: `Prim's MST: ${result.mstEdgeIndices.length} edges, weight ${result.totalWeight}` });
+    } else if (type === "kruskal") {
+      if (mstType === "kruskal") {
+        setKruskalEdges([]); kruskalActiveRef.current = false;
+        setMstType("none");
+        return;
+      }
+      kruskalActiveRef.current = true; mstActiveRef.current = false;
+      const result = runKruskal(nodesRef.current.length, edgesRef.current);
+      setKruskalEdges(result.mstEdgeIndices); setMstEdges([]);
+      setMstType("kruskal");
+      pushLog({ type: "mst", message: `Kruskal's MST: ${result.mstEdgeIndices.length} edges, weight ${result.totalWeight}` });
+    } else if (type === "both") {
+      if (mstType === "both") {
+        setMstEdges([]); setKruskalEdges([]);
+        mstActiveRef.current = false; kruskalActiveRef.current = false;
+        setMstType("none");
+        return;
+      }
+      mstActiveRef.current = true; kruskalActiveRef.current = true;
+      const pResult = runPrims(nodesRef.current.length, edgesRef.current);
+      const kResult = runKruskal(nodesRef.current.length, edgesRef.current);
+      setMstEdges(pResult.mstEdgeIndices); setKruskalEdges(kResult.mstEdgeIndices);
+      setMstType("both");
+      pushLog({ type: "mst", message: `Both MSTs: Prim w=${pResult.totalWeight}, Kruskal w=${kResult.totalWeight}` });
+    }
+  }, [pushLog, mstType]);
+
+  // Feature 2: Inject Negative Cycle
+  const onInjectNegativeCycle = useCallback(async () => {
+    try {
+      const es = edgesRef.current;
+      if (es.length < 3) { pushLog({ type: "err", message: "Not enough edges" }); return; }
+      // Build adjacency for triangle search
+      const adj = new Map();
+      es.forEach((e, idx) => {
+        if (!adj.has(e.a)) adj.set(e.a, []);
+        if (!adj.has(e.b)) adj.set(e.b, []);
+        adj.get(e.a).push({ to: e.b, idx });
+        adj.get(e.b).push({ to: e.a, idx });
+      });
+      // Find a triangle
+      let cycleIndices = null;
+      for (const [nodeA, neighbors] of adj) {
+        for (const { to: nodeB, idx: idxAB } of neighbors) {
+          if (nodeB <= nodeA) continue;
+          for (const { to: nodeC, idx: idxBC } of (adj.get(nodeB) || [])) {
+            if (nodeC <= nodeA || nodeC === nodeB) continue;
+            // Check C->A edge
+            const caEdge = (adj.get(nodeC) || []).find(x => x.to === nodeA);
+            if (caEdge) {
+              cycleIndices = [idxAB, idxBC, caEdge.idx];
+              break;
+            }
+          }
+          if (cycleIndices) break;
+        }
+        if (cycleIndices) break;
+      }
+      // Fallback: use first 3 edges on a path of length 2
+      if (!cycleIndices && es.length >= 3) {
+        cycleIndices = [0, 1, 2];
+      }
+      if (!cycleIndices) { pushLog({ type: "err", message: "Cannot find cycle edges" }); return; }
+      // Set one edge to negative weight
+      const targetIdx = cycleIndices[0];
+      const origWeight = es[targetIdx].weight;
+      setInjectedNegEdge({ idx: targetIdx, origWeight });
+      setNegCycleEdges(cycleIndices);
+      await postJson("/api/update", { edgeIdx: targetIdx, weight: -2.0, sigma: es[targetIdx].sigma, mode: "selective", k: risk });
+      await postJson("/api/run", { cmd: "run_bellman", source });
+      pushLog({ type: "neg_cycle", message: `Injected negative weight (-2.0) on edge ${es[targetIdx].a}↔${es[targetIdx].b}` });
+    } catch (error) {
+      pushLog({ type: "err", message: error.message });
+    }
+  }, [pushLog, risk, source]);
 
   // ── Feature: Step-by-step Dijkstra ────────────────────────────
   const onStartStep = useCallback(() => {
@@ -1107,6 +1299,119 @@ export default function App() {
     });
   }, [optimalPath, nodes, reliability, risk, stats, efficiency, pushLog]);
 
+  // ── Feature: Algorithm Race ────────────────────────────────────
+  const onRaceMode = useCallback(async () => {
+    try {
+      if (edgesRef.current.length === 0) return;
+
+      // Pick a random edge for selective update
+      const edgeIdx = Math.floor(Math.random() * edgesRef.current.length);
+      const current = edgesRef.current[edgeIdx];
+      const newWeight = Number((current.weight * (0.7 + Math.random() * 0.8)).toFixed(2));
+      const newSigma = Number(
+        Math.max(0.1, Math.min(1.8, current.sigma + (Math.random() - 0.5) * 0.4)).toFixed(2)
+      );
+
+      // Run both in parallel, measuring wall-clock time
+      const selectiveStart = performance.now();
+      const dijkstraStart = performance.now();
+
+      const [selectiveResp, dijkstraResp] = await Promise.all([
+        postJson("/api/update", {
+          edgeIdx,
+          weight: newWeight,
+          sigma: newSigma,
+          mode: "selective",
+          k: riskRef.current,
+        }).then((res) => {
+          const elapsed = performance.now() - selectiveStart;
+          return { res, elapsed };
+        }),
+        (async () => {
+          dijkstraQueueRef.current.push("race_dijkstra");
+          const res = await postJson("/api/run", {
+            cmd: "run_dijkstra",
+            source: sourceRef.current,
+            k: riskRef.current,
+          });
+          const elapsed = performance.now() - dijkstraStart;
+          return { res, elapsed };
+        })(),
+      ]);
+
+      const selectiveMs = Math.max(0.01, selectiveResp.elapsed);
+      const dijkstraMs = Math.max(0.01, dijkstraResp.elapsed);
+      const speedup = dijkstraMs / selectiveMs;
+      const totalNodes = nodesRef.current.length;
+      // Use the latest stats for nodesRecomputed
+      const lastUpdate = updateHistoryRef.current[updateHistoryRef.current.length - 1];
+      const nodesRecomputed = lastUpdate ? lastUpdate.nodesRecomputed : Math.floor(totalNodes * 0.3);
+      const nodesSaved = totalNodes - nodesRecomputed;
+      const nodesSavedPct = totalNodes > 0 ? Math.round((nodesSaved / totalNodes) * 100) : 0;
+
+      const raceEntry = {
+        selectiveMs: Number(selectiveMs.toFixed(2)),
+        dijkstraMs: Number(dijkstraMs.toFixed(2)),
+        speedup: Number(speedup.toFixed(1)),
+        nodesSaved,
+        nodesSavedPct,
+        nodesRecomputed,
+        totalNodes,
+        timestamp: Date.now(),
+      };
+
+      setRaceData(raceEntry);
+      setRaceHistory((prev) => [...prev, raceEntry].slice(-5));
+      pushLog({ type: "race", message: `Race complete: selective ${selectiveMs.toFixed(1)}ms vs full ${dijkstraMs.toFixed(1)}ms (${speedup.toFixed(1)}× speedup)` });
+    } catch (error) {
+      pushLog({ type: "err", message: error.message });
+    }
+  }, [pushLog]);
+
+  // ── Feature: Amortized Cost Tracker — Clear History ─────────────
+  const onClearHistory = useCallback(() => {
+    setUpdateHistory([]);
+    updateHistoryRef.current = [];
+  }, []);
+
+  // ── Feature: Empirical Complexity Analysis ──────────────────────
+  const onRunComplexityTest = useCallback(async () => {
+    setComplexityData({ dijkstra: [], prims: [], running: true });
+    pushLog({ type: "complexity", message: "Starting complexity experiment..." });
+
+    const sizes = [8, 16, 32, 64, 128, 256];
+    const dijkstraResults = [];
+    const primsResults = [];
+
+    // Use timeouts to avoid blocking the UI
+    const runNext = (sizeIdx, phase) => {
+      return new Promise((resolve) => {
+        setTimeout(() => {
+          if (phase === "dijkstra") {
+            const result = measureDijkstra(sizes[sizeIdx]);
+            dijkstraResults.push(result);
+          } else {
+            const result = measurePrims(sizes[sizeIdx]);
+            primsResults.push(result);
+          }
+          resolve();
+        }, 50);
+      });
+    };
+
+    // Run Dijkstra measurements
+    for (let i = 0; i < sizes.length; i++) {
+      await runNext(i, "dijkstra");
+    }
+    // Run Prim's measurements
+    for (let i = 0; i < sizes.length; i++) {
+      await runNext(i, "prims");
+    }
+
+    setComplexityData({ dijkstra: dijkstraResults, prims: primsResults, running: false });
+    pushLog({ type: "complexity", message: `Complexity experiment complete: ${sizes.length} sizes tested` });
+  }, [pushLog]);
+
   // ── Feature: A* Search ─────────────────────────────────────────
   const onRunAstar = useCallback((target) => {
     if (target == null || target === source) return;
@@ -1160,8 +1465,12 @@ export default function App() {
       duelData={duelData}
       ghostPaths={ghostPaths}
       mstEdges={mstEdges}
+      kruskalEdges={kruskalEdges}
+      negCycleEdges={negCycleEdges}
+      divergenceData={divergenceData}
       astarPath={astarResult?.path || []}
       stepFrontier={stepFrontier}
+      stepState={stepState}
     />
   );
 
@@ -1177,11 +1486,21 @@ export default function App() {
       risk={risk}
       astarResult={astarResult}
       mstEdges={mstEdges}
+      kruskalEdges={kruskalEdges}
       nodes={nodes}
       edges={edges}
       stepState={stepState}
       optimalPath={optimalPath}
       source={source}
+      skipTableData={skipTableData}
+      negCycleEdges={negCycleEdges}
+      divergenceData={divergenceData}
+      sptEdges={sptEdges}
+      raceData={raceData}
+      raceHistory={raceHistory}
+      updateHistory={updateHistory}
+      onClearHistory={onClearHistory}
+      complexityData={complexityData}
     />
   );
 
@@ -1208,7 +1527,7 @@ export default function App() {
       timeOfDay={timeOfDay}
       onTimeChange={onTimeChange}
       onToggleMst={onToggleMst}
-      mstActive={mstEdges.length > 0}
+      mstType={mstType}
       onRunAstar={onRunAstar}
       onStartStep={onStartStep}
       onStepForward={onStepForward}
@@ -1217,6 +1536,11 @@ export default function App() {
       stepPlaying={stepPlaying}
       onChainAttack={onChainAttack}
       onCopySummary={onCopySummary}
+      onInjectNegativeCycle={onInjectNegativeCycle}
+      onRaceMode={onRaceMode}
+      optimalPath={optimalPath}
+      onRunComplexityTest={onRunComplexityTest}
+      complexityRunning={complexityData.running}
     />
   );
 

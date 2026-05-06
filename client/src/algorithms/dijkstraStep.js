@@ -92,10 +92,14 @@ export function* dijkstraStepGenerator(nodeCount, edges, source) {
   yield {
     stepNumber,
     currentNode: -1,
+    currentNodeDist: 0,
     dist: [...dist],
     prev: [...prev],
     visited: new Set(visited),
     frontier: heap.contents(),
+    relaxationLog: [],
+    heapSnapshot: [{ nodeId: source, dist: 0 }],
+    nodeCount,
   };
 
   while (heap.size > 0) {
@@ -105,14 +109,41 @@ export function* dijkstraStepGenerator(nodeCount, edges, source) {
     visited.add(u);
     stepNumber++;
 
-    // Relax neighbors
+    // Relax neighbors — capture relaxation details
+    const relaxationLog = [];
     for (const { to: v, weight } of adj[u]) {
       if (visited.has(v)) continue;
+      const oldDist = dist[v];
       const newDist = dist[u] + weight;
-      if (newDist < dist[v]) {
+      const improved = newDist < oldDist;
+      relaxationLog.push({
+        from: u,
+        neighbor: v,
+        edgeWeight: weight,
+        oldDist,
+        newDist,
+        improved,
+      });
+      if (improved) {
         dist[v] = newDist;
         prev[v] = u;
         heap.push(newDist, v);
+      }
+    }
+
+    // Build heap snapshot — sorted copy of current heap contents
+    const heapSnapshot = heap._data
+      .map((entry) => ({ nodeId: entry.value, dist: entry.priority }))
+      .filter((entry) => !visited.has(entry.nodeId))
+      .sort((a, b) => a.dist - b.dist);
+
+    // De-duplicate (heap may have stale entries for the same node)
+    const seenInSnapshot = new Set();
+    const uniqueSnapshot = [];
+    for (const entry of heapSnapshot) {
+      if (!seenInSnapshot.has(entry.nodeId)) {
+        seenInSnapshot.add(entry.nodeId);
+        uniqueSnapshot.push(entry);
       }
     }
 
@@ -120,10 +151,14 @@ export function* dijkstraStepGenerator(nodeCount, edges, source) {
     yield {
       stepNumber,
       currentNode: u,
+      currentNodeDist: dist[u],
       dist: [...dist],
       prev: [...prev],
       visited: new Set(visited),
       frontier: heap.contents(),
+      relaxationLog,
+      heapSnapshot: uniqueSnapshot,
+      nodeCount,
     };
   }
 

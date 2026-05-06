@@ -102,8 +102,12 @@ export default function GraphCanvas({
   duelData = null,
   ghostPaths = { fastest: [], safest: [] },
   mstEdges = [],
+  kruskalEdges = [],
+  negCycleEdges = [],
+  divergenceData = null,
   astarPath = [],
   stepFrontier = [],
+  stepState = null,
 }) {
   const canvasRef = useRef(null);
   const simulationRef = useRef(null);
@@ -200,6 +204,9 @@ export default function GraphCanvas({
   }, [mapMode, nodeCoords]);
 
   const mstSet = useMemo(() => new Set(mstEdges), [mstEdges]);
+  const kruskalSet = useMemo(() => new Set(kruskalEdges), [kruskalEdges]);
+  const negCycleSet = useMemo(() => new Set(negCycleEdges), [negCycleEdges]);
+  const hasDivergence = divergenceData !== null;
 
   // ── Leaflet layer updates (map mode) ────────────────────────────────
   useEffect(() => {
@@ -350,7 +357,17 @@ export default function GraphCanvas({
       return undefined;
     }
 
-    const localNodes = nodes.map((node) => ({ ...node }));
+    const existingPositions = new Map();
+    graphRef.current.nodes.forEach(n => {
+      if (Number.isFinite(n.x) && Number.isFinite(n.y)) {
+        existingPositions.set(n.id, { x: n.x, y: n.y, vx: n.vx || 0, vy: n.vy || 0 });
+      }
+    });
+
+    const localNodes = nodes.map((node) => {
+      const existing = existingPositions.get(node.id);
+      return existing ? { ...node, ...existing } : { ...node };
+    });
     const localLinks = edges.map((edge, index) => ({
       ...edge,
       _index: index,
@@ -379,7 +396,7 @@ export default function GraphCanvas({
         .velocityDecay(0.38);
 
       simulationRef.current = simulation;
-      simulation.alpha(1).restart();
+      simulation.alpha(existingPositions.size > 0 ? 0.3 : 1).restart();
 
       const onResize = () => {
         const nextSetup = setupCanvas(canvas);
@@ -520,8 +537,34 @@ export default function GraphCanvas({
           stroke = COLOR.edgeFlash;
         }
 
-        // Weight-based thickness: 1px (light) → 4px (heavy)
+        // Negative cycle pulsing red
         let lineWidth = 1 + t * 3;
+        const isNegCycle = negCycleSet.has(edge._index);
+        if (isNegCycle) {
+          const flashAlpha = 0.5 + ((Math.sin(performance.now() / 75) + 1) * 0.5) * 0.5;
+          stroke = COLOR.edgeFlash;
+          lineWidth += 2;
+          ctx.globalAlpha = flashAlpha;
+        }
+
+        // Feature 4: Divergence mode coloring
+        const isMstEdge = mstSet.has(edge._index) || kruskalSet.has(edge._index);
+        if (hasDivergence && !isFlash && !isNegCycle) {
+          if (isSpt && !isMstEdge) {
+            stroke = "#a78bfa"; // SPT only — purple
+            ctx.globalAlpha = 0.9;
+          } else if (!isSpt && isMstEdge) {
+            stroke = "#22c55e"; // MST only — green
+            ctx.globalAlpha = 0.9;
+          } else if (isSpt && isMstEdge) {
+            stroke = "#ffffff"; // Both — white
+            ctx.globalAlpha = 1;
+          } else {
+            ctx.globalAlpha = 0.4; // Neither — dim
+          }
+        }
+
+        // Weight-based thickness adjustments
         if (showUncertainty) {
           lineWidth = Math.max(lineWidth, 1 + edgeSigma(edge));
         }
@@ -547,6 +590,19 @@ export default function GraphCanvas({
           ctx.restore();
         }
 
+        // Both (divergence) glow
+        if (hasDivergence && isSpt && isMstEdge && !isFlash) {
+          ctx.save();
+          ctx.strokeStyle = "rgba(255, 255, 255, 0.25)";
+          ctx.lineWidth = lineWidth + 8;
+          ctx.setLineDash([]);
+          ctx.beginPath();
+          ctx.moveTo(sx, sy);
+          ctx.lineTo(tx, ty);
+          ctx.stroke();
+          ctx.restore();
+        }
+
         ctx.strokeStyle = stroke;
         ctx.lineWidth = lineWidth;
 
@@ -556,7 +612,7 @@ export default function GraphCanvas({
           ctx.setLineDash([]);
         }
 
-        if (isFlash) {
+        if (isFlash && !isNegCycle) {
           const flashAlpha = 0.5 + ((Math.sin(performance.now() / 75) + 1) * 0.5) * 0.5;
           ctx.globalAlpha = flashAlpha;
         }
@@ -581,6 +637,20 @@ export default function GraphCanvas({
           ctx.textAlign = "center";
           ctx.textBaseline = "middle";
           ctx.fillText(edgeWeight(edge).toFixed(1), mx + ox, my + oy);
+
+          // Feature 4: Divergence labels at edge midpoint (demo mode only)
+          if (hasDivergence && !isFlash) {
+            let divLabel = null;
+            let divColor = null;
+            if (isSpt && !isMstEdge) { divLabel = "SP"; divColor = "#a78bfa"; }
+            else if (!isSpt && isMstEdge) { divLabel = "MST"; divColor = "#22c55e"; }
+            else if (isSpt && isMstEdge) { divLabel = "BOTH"; divColor = "#ffffff"; }
+            if (divLabel) {
+              ctx.fillStyle = divColor;
+              ctx.font = "bold 8px system-ui, sans-serif";
+              ctx.fillText(divLabel, mx - ox * 0.8, my - oy * 0.8);
+            }
+          }
         }
         ctx.restore();
       }
@@ -599,18 +669,56 @@ export default function GraphCanvas({
         const isVisiting = visitingSet.has(node.id);
         const isOnOptPath = optimalPath.includes(node.id);
         const isOnFrontier = stepFrontierSet.has(node.id);
+        const isInStepMode = stepState !== null && stepFrontier.length > 0;
+        const isSettled = isInStepMode && stepState?.visited?.has(node.id);
+        const isUndiscovered = isInStepMode && !isSettled && !isOnFrontier;
 
         ctx.beginPath();
         ctx.arc(x, y, radius, 0, Math.PI * 2);
-        // Highlight nodes on the optimal path with a teal fill
-        ctx.fillStyle = isOnOptPath ? "#0e4a5c" : COLOR.nodeFill;
-        ctx.fill();
-        ctx.lineWidth = isOnOptPath ? 2.5 : 2;
-        ctx.strokeStyle = isOnOptPath ? "#2dd4bf" : COLOR.nodeBorder;
-        ctx.stroke();
 
-        // Step-by-step frontier: amber ring
-        if (isOnFrontier && !isVisiting) {
+        // Step mode: 3-state visual distinction
+        if (isInStepMode) {
+          if (isSettled) {
+            // Settled — solid teal fill
+            ctx.fillStyle = "#0e4a5c";
+            ctx.fill();
+            ctx.lineWidth = 2.5;
+            ctx.strokeStyle = "#2dd4bf";
+            ctx.stroke();
+          } else if (isOnFrontier) {
+            // Frontier — amber fill at 30% opacity + amber ring
+            ctx.fillStyle = "rgba(251, 191, 36, 0.3)";
+            ctx.fill();
+            ctx.lineWidth = 2;
+            ctx.strokeStyle = "rgba(251, 191, 36, 0.85)";
+            ctx.stroke();
+            // Outer ring
+            ctx.beginPath();
+            ctx.arc(x, y, radius + 5, 0, Math.PI * 2);
+            ctx.strokeStyle = "rgba(251, 191, 36, 0.85)";
+            ctx.lineWidth = 2.5;
+            ctx.stroke();
+          } else {
+            // Undiscovered — dimmed
+            ctx.globalAlpha = 0.5;
+            ctx.fillStyle = COLOR.nodeFill;
+            ctx.fill();
+            ctx.lineWidth = 2;
+            ctx.strokeStyle = COLOR.nodeBorder;
+            ctx.stroke();
+            ctx.globalAlpha = 1;
+          }
+        } else {
+          // Normal mode
+          ctx.fillStyle = isOnOptPath ? "#0e4a5c" : COLOR.nodeFill;
+          ctx.fill();
+          ctx.lineWidth = isOnOptPath ? 2.5 : 2;
+          ctx.strokeStyle = isOnOptPath ? "#2dd4bf" : COLOR.nodeBorder;
+          ctx.stroke();
+        }
+
+        // Step-by-step frontier: amber ring (non-step-mode fallback)
+        if (!isInStepMode && isOnFrontier && !isVisiting) {
           ctx.beginPath();
           ctx.arc(x, y, radius + 5, 0, Math.PI * 2);
           ctx.strokeStyle = "rgba(251, 191, 36, 0.85)";
@@ -806,7 +914,7 @@ export default function GraphCanvas({
         cancelAnimationFrame(frameRef.current);
       }
     };
-  }, [duelMode, duelData, flashSet, ghostPaths, mapMode, nodeCoords, optimalEdgeSet, optimalPath, showUncertainty, sptSet, stepFrontierSet, visitingSet]);
+  }, [duelMode, duelData, flashSet, ghostPaths, mapMode, nodeCoords, optimalEdgeSet, optimalPath, showUncertainty, sptSet, stepFrontierSet, visitingSet, negCycleSet, kruskalSet, hasDivergence, mstSet]);
 
   // ── Edge click detection ──────────────────────────────────────
   const handleCanvasClick = useCallback(
