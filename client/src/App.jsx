@@ -6,6 +6,7 @@ import SidePanel from "./SidePanel";
 import ResizableLayout from "./ResizableLayout";
 import { runAstar, runDijkstraJS } from "./algorithms/astar";
 import { runPrims } from "./algorithms/mst";
+import { dijkstraStepGenerator, STEP_DONE } from "./algorithms/dijkstraStep";
 
 const API_BASE = "";
 const SOCKET_BASE =
@@ -166,6 +167,7 @@ export default function App() {
   const [stats, setStats] = useState(INITIAL_STATS);
   const [algoResults, setAlgoResults] = useState(INITIAL_RESULTS);
   const [source, setSource] = useState(0);
+  const [destination, setDestination] = useState(7);
   const [mode, setMode] = useState("selective");
   const [showUncertainty, setShowUncertainty] = useState(true);
   const [risk, setRisk] = useState(1);
@@ -181,7 +183,11 @@ export default function App() {
   const [ghostPaths, setGhostPaths] = useState({ fastest: [], safest: [] });
   const [mstEdges, setMstEdges] = useState([]);
   const [astarResult, setAstarResult] = useState(null);
-  const [astarTarget, setAstarTarget] = useState(null);
+  const [astarTarget, setAstarTarget] = useState(8); // Knowledge Park — farthest from source 0
+  const [stepMode, setStepMode] = useState(false);
+  const [stepState, setStepState] = useState(null);
+  const [stepPlaying, setStepPlaying] = useState(false);
+  const [stepFrontier, setStepFrontier] = useState([]);
 
   const duelModeRef = useRef(false);
   const nodesRef = useRef(nodes);
@@ -192,6 +198,10 @@ export default function App() {
   const dijkstraQueueRef = useRef([]);
   const clearVisitTimerRef = useRef(null);
   const clearFlashTimerRef = useRef(null);
+  const mstActiveRef = useRef(false);
+  const stepGenRef = useRef(null);
+  const stepPlayTimerRef = useRef(null);
+  const destinationRef = useRef(destination);
 
   useEffect(() => {
     nodesRef.current = nodes;
@@ -216,6 +226,10 @@ export default function App() {
   useEffect(() => {
     riskRef.current = risk;
   }, [risk]);
+
+  useEffect(() => {
+    destinationRef.current = destination;
+  }, [destination]);
 
   useEffect(
     () => () => {
@@ -324,19 +338,19 @@ export default function App() {
           setSource(sourceId);
 
           const prev = safeArray(event.prev);
-          const target = nodesRef.current.length - 1;
+          const target = destinationRef.current;
           setOptimalPath(buildPath(prev, sourceId, target));
         }
 
         if (tag === "ghost_fast") {
           const gPrev = safeArray(event.prev);
-          const target = nodesRef.current.length - 1;
+          const target = destinationRef.current;
           setGhostPaths((gp) => ({ ...gp, fastest: buildPath(gPrev, sourceId, target) }));
           return;
         }
         if (tag === "ghost_safe") {
           const gPrev = safeArray(event.prev);
-          const target = nodesRef.current.length - 1;
+          const target = destinationRef.current;
           setGhostPaths((gp) => ({ ...gp, safest: buildPath(gPrev, sourceId, target) }));
           return;
         }
@@ -373,7 +387,7 @@ export default function App() {
           if (prev.length > 0) {
             applySpt(deriveSptEdgesFromPrev(prev, nextEdges));
             const sourceId = Number.isInteger(source) ? source : 0;
-            const target = nodesRef.current.length - 1;
+            const target = destinationRef.current;
             setOptimalPath(buildPath(prev, sourceId, target));
           }
         }
@@ -400,6 +414,12 @@ export default function App() {
           updates: prev.updates + 1,
           reEvaluated: prev.reEvaluated + toNumberOr(event.nodesRecomputed, 0),
         }));
+
+        // Auto-refresh MST if currently visible
+        if (mstActiveRef.current) {
+          const result = runPrims(nodesRef.current.length, edgesRef.current);
+          setMstEdges(result.mstEdgeIndices);
+        }
         return;
       }
 
@@ -425,6 +445,26 @@ export default function App() {
         }
 
         setStats((prev) => ({ ...prev, updates: prev.updates + 1 }));
+
+        // Bug 2 fix: track duel data for adversarial updates
+        if (duelModeRef.current) {
+          const eidx = Number(event.edgeIdx);
+          const selNodes = Number.isInteger(eidx) && eidx >= 0 && eidx < edgesRef.current.length
+            ? [edgesRef.current[eidx].a, edgesRef.current[eidx].b]
+            : [];
+          setDuelData({
+            fullCount: nodesRef.current.length,
+            selectiveCount: selNodes.length,
+            selectiveNodes: selNodes,
+            timestamp: Date.now(),
+          });
+        }
+
+        // Auto-refresh MST if currently visible
+        if (mstActiveRef.current) {
+          const result = runPrims(nodesRef.current.length, edgesRef.current);
+          setMstEdges(result.mstEdgeIndices);
+        }
         return;
       }
 
@@ -446,6 +486,12 @@ export default function App() {
         }
 
         setStats((prev) => ({ ...prev, updates: prev.updates + 1 }));
+
+        // Auto-refresh MST if currently visible
+        if (mstActiveRef.current) {
+          const result = runPrims(nodesRef.current.length, edgesRef.current);
+          setMstEdges(result.mstEdgeIndices);
+        }
         return;
       }
 
@@ -455,6 +501,23 @@ export default function App() {
           updates: prev.updates + toNumberOr(event.totalUpdates, 0),
           reEvaluated: prev.reEvaluated + toNumberOr(event.nodesRecomputed, 0),
         }));
+
+        // Bug 2 fix: track duel data for batch updates
+        if (duelModeRef.current) {
+          const recomputed = toNumberOr(event.nodesRecomputed, 0);
+          setDuelData({
+            fullCount: nodesRef.current.length,
+            selectiveCount: recomputed,
+            selectiveNodes: [],
+            timestamp: Date.now(),
+          });
+        }
+
+        // Auto-refresh MST if currently visible
+        if (mstActiveRef.current) {
+          const result = runPrims(nodesRef.current.length, edgesRef.current);
+          setMstEdges(result.mstEdgeIndices);
+        }
         return;
       }
 
@@ -551,9 +614,10 @@ export default function App() {
       const graphData = data?.graph;
       if (graphData) {
         const n = graphData.nodes || 0;
+        const labels = graphData.nodeLabels || {};
         const newNodes = [];
         for (let i = 0; i < n; i++) {
-          newNodes.push({ id: i, label: `N${i}`, dist: Infinity });
+          newNodes.push({ id: i, label: labels[i] || labels[String(i)] || `N${i}`, dist: Infinity });
         }
         if (newNodes.length > 0) {
           newNodes[0].dist = 0;
@@ -575,6 +639,7 @@ export default function App() {
         setStats({ nodes: n, edges: newEdges.length, updates: 0, reEvaluated: 0 });
         setAlgoResults(INITIAL_RESULTS);
         setSource(0);
+        setDestination(n > 1 ? n - 1 : 0);
         dijkstraQueueRef.current = [];
         setDuelData(null);
         setGhostPaths({ fastest: [], safest: [] });
@@ -647,9 +712,9 @@ export default function App() {
         await queueDijkstraRun("dijkstra", { cmd: "run_dijkstra", source, k: risk });
         await queueDijkstraRun("standard", { cmd: "run_standard", source });
         await postJson("/api/run", { cmd: "run_bellman", source });
-        // Ghost alternate routes
-        queueDijkstraRun("ghost_fast", { cmd: "run_dijkstra", source, k: 0 }).catch(() => {});
-        queueDijkstraRun("ghost_safe", { cmd: "run_dijkstra", source, k: 3 }).catch(() => {});
+        // Ghost alternate routes — sequential (Bug 3)
+        try { await queueDijkstraRun("ghost_fast", { cmd: "run_dijkstra", source, k: 0 }); } catch {}
+        try { await queueDijkstraRun("ghost_safe", { cmd: "run_dijkstra", source, k: 3 }); } catch {}
       } catch (error) {
         pushLog({ type: "err", message: error.message });
       }
@@ -703,8 +768,8 @@ export default function App() {
           await queueDijkstraRun("dijkstra", { cmd: "run_dijkstra", source, k: risk });
           await queueDijkstraRun("standard", { cmd: "run_standard", source });
           await postJson("/api/run", { cmd: "run_bellman", source });
-          queueDijkstraRun("ghost_fast", { cmd: "run_dijkstra", source, k: 0 }).catch(() => {});
-          queueDijkstraRun("ghost_safe", { cmd: "run_dijkstra", source, k: 3 }).catch(() => {});
+          try { await queueDijkstraRun("ghost_fast", { cmd: "run_dijkstra", source, k: 0 }); } catch {}
+          try { await queueDijkstraRun("ghost_safe", { cmd: "run_dijkstra", source, k: 3 }); } catch {}
         } catch (error) {
           pushLog({ type: "err", message: error.message });
         }
@@ -757,46 +822,56 @@ export default function App() {
       await queueDijkstraRun("dijkstra", { cmd: "run_dijkstra", source, k: risk });
       await queueDijkstraRun("standard", { cmd: "run_standard", source });
       await postJson("/api/run", { cmd: "run_bellman", source });
-      // Ghost alternate routes
-      queueDijkstraRun("ghost_fast", { cmd: "run_dijkstra", source, k: 0 }).catch(() => {});
-      queueDijkstraRun("ghost_safe", { cmd: "run_dijkstra", source, k: 3 }).catch(() => {});
+      // Ghost alternate routes — sequential to prevent queue-shift race condition (Bug 3)
+      try { await queueDijkstraRun("ghost_fast", { cmd: "run_dijkstra", source, k: 0 }); } catch {}
+      try { await queueDijkstraRun("ghost_safe", { cmd: "run_dijkstra", source, k: 3 }); } catch {}
     } catch (error) {
       pushLog({ type: "err", message: error.message });
     }
   }, [queueDijkstraRun, pushLog, risk, source]);
 
   // ── Feature: Live k-slider auto-rerun ──────────────────────────
-  const hasRunOnceRef = useRef(false);
+  const optimalPathRef = useRef(optimalPath);
+  useEffect(() => { optimalPathRef.current = optimalPath; }, [optimalPath]);
+
   useEffect(() => {
-    // Don't auto-run on mount or if graph isn't initialized
-    if (!hasRunOnceRef.current || edgesRef.current.length === 0) {
+    // Bug 6 fix: auto-run when a path is displayed, not based on hasRunOnceRef
+    if (optimalPathRef.current.length === 0 || edgesRef.current.length === 0) {
       return;
     }
-    const timer = setTimeout(() => {
+    const timer = setTimeout(async () => {
       const s = sourceRef.current;
       const k = riskRef.current;
-      queueDijkstraRun("dijkstra", { cmd: "run_dijkstra", source: s, k }).catch(() => {});
-      queueDijkstraRun("standard", { cmd: "run_standard", source: s }).catch(() => {});
+      try { await queueDijkstraRun("dijkstra", { cmd: "run_dijkstra", source: s, k }); } catch {}
+      try { await queueDijkstraRun("standard", { cmd: "run_standard", source: s }); } catch {}
       postJson("/api/run", { cmd: "run_bellman", source: s }).catch(() => {});
-      queueDijkstraRun("ghost_fast", { cmd: "run_dijkstra", source: s, k: 0 }).catch(() => {});
-      queueDijkstraRun("ghost_safe", { cmd: "run_dijkstra", source: s, k: 3 }).catch(() => {});
+      try { await queueDijkstraRun("ghost_fast", { cmd: "run_dijkstra", source: s, k: 0 }); } catch {}
+      try { await queueDijkstraRun("ghost_safe", { cmd: "run_dijkstra", source: s, k: 3 }); } catch {}
     }, 400);
     return () => clearTimeout(timer);
-  }, [risk, queueDijkstraRun]); // eslint-disable-line react-hooks/exhaustive-deps
-
-  // Mark that user has run at least once
-  const originalOnRun = onRun;
-  const onRunTracked = useCallback(async () => {
-    hasRunOnceRef.current = true;
-    await originalOnRun();
-  }, [originalOnRun]);
+  }, [risk, destination, queueDijkstraRun]); // eslint-disable-line react-hooks/exhaustive-deps
 
   const onReset = useCallback(async () => {
     try {
-      if (mapMode && edgesRef.current.length > 10) {
-        // In map mode: re-init C++ with the landmark graph, don't fall back to demo
-        await onLoadOsm();
-        pushLog({ type: "reset", message: "Map graph reloaded" });
+      if (mapMode && baseEdges.length > 0) {
+        // Bug 4 fix: reset locally from baseEdges — no onLoadOsm(), no map flicker
+        const resetEdges = baseEdges.map((e) => ({ ...e, inSPT: false }));
+        setEdgesWithRef(resetEdges);
+        setSptEdges([]);
+        setOptimalPath([]);
+        setFlashingEdges([]);
+        setVisitingNodes([]);
+        setStats((prev) => ({ ...prev, updates: 0, reEvaluated: 0 }));
+        setAlgoResults(INITIAL_RESULTS);
+        setDuelData(null);
+        setGhostPaths({ fastest: [], safest: [] });
+        setTimeOfDay(null);
+        setMstEdges([]);
+        mstActiveRef.current = false;
+        // Re-init C++ with base edges
+        const edgeTuples = baseEdges.map((e) => [e.a, e.b, e.weight, e.sigma]);
+        await postJson("/api/run", { cmd: "init", nodes: nodesRef.current.length, edges: edgeTuples });
+        pushLog({ type: "reset", message: "Map graph reset to base weights" });
       } else {
         await postJson("/api/reset", {});
         resetLocalGraph();
@@ -805,7 +880,7 @@ export default function App() {
     } catch (error) {
       pushLog({ type: "err", message: error.message });
     }
-  }, [mapMode, onLoadOsm, pushLog, resetLocalGraph]);
+  }, [mapMode, baseEdges, pushLog, resetLocalGraph, setEdgesWithRef]);
 
   const onEdgeUpdate = useCallback(async () => {
     try {
@@ -904,12 +979,133 @@ export default function App() {
   // ── Feature: MST Toggle ────────────────────────────────────────
   const onToggleMst = useCallback(() => {
     setMstEdges((prev) => {
-      if (prev.length > 0) return []; // toggle off
+      if (prev.length > 0) {
+        mstActiveRef.current = false;
+        return []; // toggle off
+      }
+      mstActiveRef.current = true;
       const result = runPrims(nodesRef.current.length, edgesRef.current);
       pushLog({ type: "mst", message: `Prim's MST: ${result.mstEdgeIndices.length} edges, total weight ${result.totalWeight}` });
       return result.mstEdgeIndices;
     });
   }, [pushLog]);
+
+  // ── Feature: Step-by-step Dijkstra ────────────────────────────
+  const onStartStep = useCallback(() => {
+    const gen = dijkstraStepGenerator(nodesRef.current.length, edgesRef.current, source);
+    stepGenRef.current = gen;
+    setStepMode(true);
+    setStepPlaying(false);
+    if (stepPlayTimerRef.current) clearInterval(stepPlayTimerRef.current);
+    // Get initial state
+    const first = gen.next();
+    if (!first.done) {
+      const state = first.value;
+      setStepState(state);
+      setStepFrontier(state.frontier);
+      setVisitingNodes([]);
+      // Reset distances to infinity for visual
+      setNodes((prev) => prev.map((n) => ({ ...n, dist: state.dist[n.id] })));
+    }
+    pushLog({ type: "step", message: "Step-by-step Dijkstra started" });
+  }, [source, pushLog]);
+
+  const onStepForward = useCallback(() => {
+    const gen = stepGenRef.current;
+    if (!gen) return;
+    const next = gen.next();
+    if (next.done) {
+      setStepMode(false);
+      setStepState(null);
+      setStepFrontier([]);
+      setStepPlaying(false);
+      if (stepPlayTimerRef.current) clearInterval(stepPlayTimerRef.current);
+      pushLog({ type: "step", message: "Dijkstra complete" });
+      return;
+    }
+    const state = next.value;
+    setStepState(state);
+    setStepFrontier(state.frontier);
+    setVisitingNodes(state.currentNode >= 0 ? [state.currentNode] : []);
+    setNodes((prev) => prev.map((n) => ({ ...n, dist: state.dist[n.id] })));
+    // Build SPT from prev
+    const sptIdx = deriveSptEdgesFromPrev(state.prev, edgesRef.current);
+    applySpt(sptIdx);
+  }, [applySpt, pushLog]);
+
+  const onStepPlay = useCallback(() => {
+    if (stepPlaying) {
+      // Pause
+      setStepPlaying(false);
+      if (stepPlayTimerRef.current) clearInterval(stepPlayTimerRef.current);
+      return;
+    }
+    setStepPlaying(true);
+    const delay = Math.max(150, 800 - speedRef.current * 120);
+    stepPlayTimerRef.current = setInterval(() => {
+      const gen = stepGenRef.current;
+      if (!gen) { clearInterval(stepPlayTimerRef.current); return; }
+      const next = gen.next();
+      if (next.done) {
+        clearInterval(stepPlayTimerRef.current);
+        setStepMode(false);
+        setStepState(null);
+        setStepFrontier([]);
+        setStepPlaying(false);
+        return;
+      }
+      const state = next.value;
+      setStepState(state);
+      setStepFrontier(state.frontier);
+      setVisitingNodes(state.currentNode >= 0 ? [state.currentNode] : []);
+      setNodes((prev) => prev.map((n) => ({ ...n, dist: state.dist[n.id] })));
+      const sptIdx = deriveSptEdgesFromPrev(state.prev, edgesRef.current);
+      applySpt(sptIdx);
+    }, delay);
+  }, [stepPlaying, applySpt]);
+
+  // Cleanup step play timer on unmount
+  useEffect(() => () => {
+    if (stepPlayTimerRef.current) clearInterval(stepPlayTimerRef.current);
+  }, []);
+
+  // ── Idea 4: Adversarial Chain Attack ─────────────────────────
+  const onChainAttack = useCallback(async () => {
+    try {
+      for (let i = 1; i <= 3; i++) {
+        await postJson("/api/adversarial", { k: risk });
+        pushLog({ type: "chain", message: `Chain Attack ${i}/3 executed` });
+        if (i < 3) await new Promise((r) => setTimeout(r, 800));
+      }
+      // Re-run Dijkstra after chain
+      try { await queueDijkstraRun("dijkstra", { cmd: "run_dijkstra", source, k: risk }); } catch {}
+      try { await queueDijkstraRun("standard", { cmd: "run_standard", source }); } catch {}
+      pushLog({ type: "chain", message: "Chain Attack complete — 3 critical edges disrupted" });
+    } catch (error) {
+      pushLog({ type: "err", message: error.message });
+    }
+  }, [pushLog, queueDijkstraRun, risk, source]);
+
+  // ── Idea 5: Copy Summary ────────────────────────────────────
+  const onCopySummary = useCallback(() => {
+    const pathLabels = optimalPath.map((id) => {
+      const n = nodes.find((nd) => nd.id === id);
+      return n?.label || `N${id}`;
+    }).join(" \u2192 ");
+    const lastNode = nodes.find((n) => n.id === optimalPath[optimalPath.length - 1]);
+    const dist = lastNode && Number.isFinite(lastNode.dist) ? lastNode.dist.toFixed(1) : "N/A";
+    const summary = [
+      `Path: ${pathLabels || "(none)"}`,
+      `Distance: ${dist} | Hops: ${Math.max(0, optimalPath.length - 1)} | Reliability: ${reliability ?? "N/A"}%`,
+      `Algorithm: Probabilistic Dijkstra (k=${Number(risk).toFixed(1)})`,
+      `Updates: ${stats.updates} | Nodes re-evaluated: ${stats.reEvaluated} | Efficiency: ${efficiency ?? "N/A"}%`,
+    ].join("\n");
+    navigator.clipboard.writeText(summary).then(() => {
+      pushLog({ type: "copy", message: "Summary copied to clipboard" });
+    }).catch(() => {
+      pushLog({ type: "err", message: "Failed to copy to clipboard" });
+    });
+  }, [optimalPath, nodes, reliability, risk, stats, efficiency, pushLog]);
 
   // ── Feature: A* Search ─────────────────────────────────────────
   const onRunAstar = useCallback((target) => {
@@ -965,6 +1161,7 @@ export default function App() {
       ghostPaths={ghostPaths}
       mstEdges={mstEdges}
       astarPath={astarResult?.path || []}
+      stepFrontier={stepFrontier}
     />
   );
 
@@ -982,19 +1179,24 @@ export default function App() {
       mstEdges={mstEdges}
       nodes={nodes}
       edges={edges}
+      stepState={stepState}
+      optimalPath={optimalPath}
+      source={source}
     />
   );
 
   const controlsEl = (
     <Controls
-      onRun={onRunTracked}
+      onRun={onRun}
       onReset={onReset}
       onSourceChange={setSource}
+      onDestinationChange={setDestination}
       onModeChange={setMode}
       onRiskChange={setRisk}
       onSpeedChange={setSpeed}
       nodes={controlsNodes}
       source={source}
+      destination={destination}
       mode={mode}
       risk={risk}
       speed={speed}
@@ -1008,8 +1210,13 @@ export default function App() {
       onToggleMst={onToggleMst}
       mstActive={mstEdges.length > 0}
       onRunAstar={onRunAstar}
-      astarTarget={astarTarget}
-      onAstarTargetChange={setAstarTarget}
+      onStartStep={onStartStep}
+      onStepForward={onStepForward}
+      onStepPlay={onStepPlay}
+      stepMode={stepMode}
+      stepPlaying={stepPlaying}
+      onChainAttack={onChainAttack}
+      onCopySummary={onCopySummary}
     />
   );
 
@@ -1038,6 +1245,7 @@ export default function App() {
 
 function EdgeWeightModal({ edgeA, edgeB, currentWeight, onSubmit, onCancel }) {
   const [value, setValue] = useState(String(currentWeight));
+  const [error, setError] = useState("");
   const inputRef = useRef(null);
 
   useEffect(() => {
@@ -1047,8 +1255,12 @@ function EdgeWeightModal({ edgeA, edgeB, currentWeight, onSubmit, onCancel }) {
 
   const handleSubmit = () => {
     const n = parseFloat(value);
-    if (Number.isFinite(n) && n > 0) onSubmit(n);
-    else onCancel();
+    if (Number.isFinite(n) && n > 0) {
+      setError("");
+      onSubmit(n);
+    } else {
+      setError("Enter a positive number (> 0)");
+    }
   };
 
   return (
@@ -1061,17 +1273,18 @@ function EdgeWeightModal({ edgeA, edgeB, currentWeight, onSubmit, onCancel }) {
         <div className="modal-current">Current: {currentWeight}</div>
         <input
           ref={inputRef}
-          className="modal-input"
+          className={`modal-input ${error ? "modal-input-error" : ""}`}
           type="number"
           step="0.1"
           min="0.1"
           value={value}
-          onChange={(e) => setValue(e.target.value)}
+          onChange={(e) => { setValue(e.target.value); setError(""); }}
           onKeyDown={(e) => {
             if (e.key === "Enter") handleSubmit();
             if (e.key === "Escape") onCancel();
           }}
         />
+        {error && <div className="modal-error">{error}</div>}
         <div className="modal-actions">
           <button className="modal-btn modal-cancel" onClick={onCancel}>Cancel</button>
           <button className="modal-btn modal-apply" onClick={handleSubmit}>Apply</button>
@@ -1079,4 +1292,4 @@ function EdgeWeightModal({ edgeA, edgeB, currentWeight, onSubmit, onCancel }) {
       </div>
     </div>
   );
-}
+}

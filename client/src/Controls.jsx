@@ -17,20 +17,17 @@ function formatHour(h) {
   return `${h12}:${min.toString().padStart(2, "0")} ${ampm}`;
 }
 
-function timeEmoji(h) {
-  // Removing emojis for a cleaner, cinematic aesthetic
-  return "";
-}
-
 export default function Controls({
   onRun,
   onReset,
   onSourceChange,
+  onDestinationChange,
   onModeChange,
   onRiskChange,
   onSpeedChange,
   nodes,
   source,
+  destination,
   mode,
   risk,
   speed,
@@ -44,8 +41,13 @@ export default function Controls({
   onToggleMst,
   mstActive,
   onRunAstar,
-  astarTarget,
-  onAstarTargetChange,
+  onStartStep,
+  onStepForward,
+  onStepPlay,
+  stepMode,
+  stepPlaying,
+  onChainAttack,
+  onCopySummary,
 }) {
   return (
     <section className="controls-panel">
@@ -57,9 +59,29 @@ export default function Controls({
         <button className="ctl-btn" onClick={onReset}>
           Reset Grid
         </button>
+        <button className="ctl-btn ctl-copy" onClick={onCopySummary}>
+          Copy Summary
+        </button>
       </div>
 
-      {/* Row 2: Map + DAA features */}
+      {/* Row 2: Step-by-step Dijkstra */}
+      <div className="controls-row controls-row-3">
+        <button className="ctl-btn ctl-step" onClick={onStartStep}>
+          Step Dijkstra
+        </button>
+        {stepMode && (
+          <>
+            <button className="ctl-btn" onClick={onStepForward}>
+              Step →
+            </button>
+            <button className="ctl-btn" onClick={onStepPlay}>
+              {stepPlaying ? "Pause" : "Play"}
+            </button>
+          </>
+        )}
+      </div>
+
+      {/* Row 3: Map + DAA features */}
       <div className="controls-row controls-row-3">
         <button className="ctl-btn ctl-map" onClick={onLoadMap}>
           Load Map Data
@@ -73,33 +95,79 @@ export default function Controls({
         {mapMode && (
           <button
             className="ctl-btn ctl-astar"
-            onClick={() => {
-              const t = astarTarget != null ? astarTarget : nodes.length - 1;
-              onRunAstar(t);
-            }}
+            onClick={() => onRunAstar(destination)}
           >
             Run A* Heuristic
           </button>
         )}
       </div>
 
-      {/* A* target selector — map mode only */}
-      {mapMode && (
-        <div className="control-block">
-          <div className="block-title">A* Target Node</div>
-          <select
-            className="source-select"
-            value={astarTarget ?? nodes.length - 1}
-            onChange={(e) => onAstarTargetChange(Number(e.target.value))}
-          >
-            {nodes.map((node) => (
-              <option key={node.id} value={node.id}>
-                {sourceLabel(node)}
-              </option>
-            ))}
-          </select>
+      {/* Source & Destination selectors */}
+      <div className="control-block node-selector-block">
+        <div className="node-selector-pair">
+          <div className="node-selector">
+            <div className="block-title">Source</div>
+            {nodes.length <= 10 && !mapMode ? (
+              <div className="source-row">
+                {nodes.map((node) => (
+                  <button
+                    key={node.id}
+                    className={`source-btn ${source === node.id ? "active" : ""}`}
+                    onClick={() => onSourceChange(node.id)}
+                    title={sourceLabel(node)}
+                  >
+                    {sourceLabel(node)}
+                  </button>
+                ))}
+              </div>
+            ) : (
+              <select
+                className="source-select"
+                value={source}
+                onChange={(e) => onSourceChange(Number(e.target.value))}
+              >
+                {nodes.map((node) => (
+                  <option key={node.id} value={node.id}>
+                    {sourceLabel(node)}
+                  </option>
+                ))}
+              </select>
+            )}
+          </div>
+
+          <div className="node-selector-arrow">→</div>
+
+          <div className="node-selector">
+            <div className="block-title">Destination</div>
+            {nodes.length <= 10 && !mapMode ? (
+              <div className="source-row">
+                {nodes.map((node) => (
+                  <button
+                    key={node.id}
+                    className={`source-btn dest-btn ${destination === node.id ? "active" : ""}`}
+                    onClick={() => onDestinationChange(node.id)}
+                    title={sourceLabel(node)}
+                  >
+                    {sourceLabel(node)}
+                  </button>
+                ))}
+              </div>
+            ) : (
+              <select
+                className="source-select dest-select"
+                value={destination}
+                onChange={(e) => onDestinationChange(Number(e.target.value))}
+              >
+                {nodes.map((node) => (
+                  <option key={node.id} value={node.id}>
+                    {sourceLabel(node)}
+                  </option>
+                ))}
+              </select>
+            )}
+          </div>
         </div>
-      )}
+      </div>
 
       {/* Traffic scenario presets — only shown in map mode */}
       {mapMode && (
@@ -131,13 +199,16 @@ export default function Controls({
             </button>
           </div>
 
-          {/* Duel Mode Toggle */}
+          {/* Duel Mode + Chain Attack */}
           <div className="controls-row controls-row-2">
             <button
               className={`ctl-btn ctl-duel ${duelMode ? "active" : ""}`}
               onClick={onDuelToggle}
             >
               Algorithm Duel {duelMode ? "ON" : "OFF"}
+            </button>
+            <button className="ctl-btn ctl-chain" onClick={onChainAttack}>
+              Chain Attack (×3)
             </button>
           </div>
 
@@ -172,36 +243,6 @@ export default function Controls({
           </div>
         </>
       )}
-
-      {/* Source node selector */}
-      <div className="control-block">
-        <div className="block-title">Source Node</div>
-        {nodes.length <= 10 ? (
-          <div className="source-row">
-            {nodes.map((node) => (
-              <button
-                key={node.id}
-                className={`source-btn ${source === node.id ? "active" : ""}`}
-                onClick={() => onSourceChange(node.id)}
-              >
-                {sourceLabel(node)}
-              </button>
-            ))}
-          </div>
-        ) : (
-          <select
-            className="source-select"
-            value={source}
-            onChange={(e) => onSourceChange(Number(e.target.value))}
-          >
-            {nodes.map((node) => (
-              <option key={node.id} value={node.id}>
-                {sourceLabel(node)}
-              </option>
-            ))}
-          </select>
-        )}
-      </div>
 
       {/* Mode toggle */}
       <div className="control-block">

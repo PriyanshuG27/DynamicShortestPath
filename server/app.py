@@ -243,19 +243,21 @@ def api_load_osm():
         "edges": edge_tuples,
     }
 
+    node_labels = {nd["id"]: nd.get("label", f"N{nd['id']}") for nd in nodes_list}
+
     result = _send_and_emit(
         command,
         extra={
             "graph": {
                 "nodes": n,
                 "edges": edge_tuples,
+                "nodeLabels": node_labels,
             }
         },
     )
 
     # Emit rich graph metadata for the frontend
     node_coords = [[nd["id"], nd["lat"], nd["lng"]] for nd in nodes_list]
-    node_labels = {nd["id"]: nd.get("label", f"N{nd['id']}") for nd in nodes_list}
     node_types = {nd["id"]: nd.get("type", "residential") for nd in nodes_list}
 
     socketio.emit("cpp_event", {

@@ -96,13 +96,12 @@ export function runAstar(nodes, edges, nodeCoords, source, target) {
   const n = nodes.length;
   const adj = buildAdj(n, edges);
 
-  const targetCoord = nodeCoords[target];
-  if (!targetCoord) {
-    return { path: [], dist: Infinity, nodesExpanded: 0, expandedSet: [] };
-  }
+  const targetCoord = nodeCoords?.[target];
 
-  // Heuristic: straight-line distance to target
+  // Heuristic: straight-line distance to target.
+  // When coordinates are unavailable (demo mode), h(n) = 0 → degrades to Dijkstra.
   const h = (nodeId) => {
+    if (!targetCoord) return 0;
     const c = nodeCoords[nodeId];
     if (!c) return 0;
     return haversineKm(c.lat, c.lng, targetCoord.lat, targetCoord.lng);

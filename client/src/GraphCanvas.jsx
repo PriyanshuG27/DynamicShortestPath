@@ -4,7 +4,7 @@ import * as L from "leaflet";
 
 const COLOR = {
   edgeDefault: "#737b87",
-  edgeSpt: "#7c6ef7",
+  edgeSpt: "#a78bfa",
   edgePath: "#2dd4bf",
   edgeFlash: "#ef4444",
   nodeFill: "#111418",
@@ -103,6 +103,7 @@ export default function GraphCanvas({
   ghostPaths = { fastest: [], safest: [] },
   mstEdges = [],
   astarPath = [],
+  stepFrontier = [],
 }) {
   const canvasRef = useRef(null);
   const simulationRef = useRef(null);
@@ -131,6 +132,8 @@ export default function GraphCanvas({
     return set;
   }, [optimalPath]);
 
+  const stepFrontierSet = useMemo(() => new Set(stepFrontier), [stepFrontier]);
+
   // ── Leaflet map lifecycle ──────────────────────────────────────────
   useEffect(() => {
     if (!mapMode) {
@@ -140,6 +143,9 @@ export default function GraphCanvas({
       }
       return undefined;
     }
+
+    // Wait until nodeCoords is actually populated before initializing the map
+    if (Object.keys(nodeCoords).length === 0) return undefined;
 
     const el = mapContainerRef.current;
     if (!el) return undefined;
@@ -232,21 +238,28 @@ export default function GraphCanvas({
       if (isFlash) { color = COLOR.edgeFlash; weight += 1; opacity = 1; }
       if (isMst) { color = "#22c55e"; dashArray = "8 5"; weight = 3; opacity = 0.8; }
 
-      const polyline = L.polyline(
+      // Invisible, wide polyline for easier clicking and tooltip
+      const hitBox = L.polyline(
         [[ca.lat, ca.lng], [cb.lat, cb.lng]],
-        { color, weight, opacity, dashArray, className: "graph-edge" }
+        { color: 'transparent', weight: 20, opacity: 0, className: "graph-edge-hitbox" }
       );
 
-      // Edge click for weight editing
-      polyline.on("click", (e) => {
+      hitBox.on("click", (e) => {
         L.DomEvent.stopPropagation(e);
         if (onEdgeClick) onEdgeClick(idx);
       });
 
-      // Tooltip with weight info
-      polyline.bindTooltip(
+      hitBox.bindTooltip(
         `Edge ${edge.a}↔${edge.b}<br>Weight: ${edgeWeight(edge).toFixed(1)}<br>σ: ${edgeSigma(edge).toFixed(2)}`,
         { sticky: true, className: "edge-tooltip" }
+      );
+
+      hitBox.addTo(edgeLayerRef.current);
+
+      // Visible polyline
+      const polyline = L.polyline(
+        [[ca.lat, ca.lng], [cb.lat, cb.lng]],
+        { color, weight, opacity, dashArray, className: "graph-edge", interactive: false }
       );
 
       polyline.addTo(edgeLayerRef.current);
@@ -257,7 +270,7 @@ export default function GraphCanvas({
       if (!path || path.length < 2) return;
       const latlngs = path.map(id => nodeCoords[id]).filter(Boolean).map(c => [c.lat, c.lng]);
       if (latlngs.length < 2) return;
-      L.polyline(latlngs, { color, weight: 3, opacity: 0.35, dashArray: "6 8" })
+      L.polyline(latlngs, { color, weight: 3, opacity: 0.35, dashArray: "6 8", interactive: false })
         .addTo(pathLayerRef.current);
     };
     drawGhost(ghostPaths.fastest, "#f97316");
@@ -267,7 +280,7 @@ export default function GraphCanvas({
     if (astarPath.length > 1) {
       const latlngs = astarPath.map(id => nodeCoords[id]).filter(Boolean).map(c => [c.lat, c.lng]);
       if (latlngs.length > 1) {
-        L.polyline(latlngs, { color: "#fbbf24", weight: 4, opacity: 0.85, dashArray: "10 6" })
+        L.polyline(latlngs, { color: "#fbbf24", weight: 4, opacity: 0.85, dashArray: "10 6", interactive: false })
           .addTo(pathLayerRef.current);
       }
     }
@@ -277,10 +290,10 @@ export default function GraphCanvas({
       const latlngs = optimalPath.map(id => nodeCoords[id]).filter(Boolean).map(c => [c.lat, c.lng]);
       if (latlngs.length > 1) {
         // Glowing backdrop for high visibility
-        L.polyline(latlngs, { color: COLOR.edgePath, weight: 12, opacity: 0.3 })
+        L.polyline(latlngs, { color: COLOR.edgePath, weight: 12, opacity: 0.3, interactive: false })
           .addTo(pathLayerRef.current);
         // Main solid path
-        L.polyline(latlngs, { color: COLOR.edgePath, weight: 6, opacity: 1 })
+        L.polyline(latlngs, { color: COLOR.edgePath, weight: 6, opacity: 1, interactive: false })
           .addTo(pathLayerRef.current);
       }
     }
@@ -513,13 +526,27 @@ export default function GraphCanvas({
           lineWidth = Math.max(lineWidth, 1 + edgeSigma(edge));
         }
         if (isSpt) {
-          lineWidth += 0.9;
+          lineWidth += 1.5;
         }
         if (isOptimal) {
           lineWidth += 1.2;
         }
 
         ctx.save();
+
+        // SPT glow effect — draw a wider, semi-transparent stroke underneath
+        if (isSpt && !isFlash) {
+          ctx.save();
+          ctx.strokeStyle = "rgba(167, 139, 250, 0.35)";
+          ctx.lineWidth = lineWidth + 6;
+          ctx.setLineDash([]);
+          ctx.beginPath();
+          ctx.moveTo(sx, sy);
+          ctx.lineTo(tx, ty);
+          ctx.stroke();
+          ctx.restore();
+        }
+
         ctx.strokeStyle = stroke;
         ctx.lineWidth = lineWidth;
 
@@ -571,6 +598,7 @@ export default function GraphCanvas({
 
         const isVisiting = visitingSet.has(node.id);
         const isOnOptPath = optimalPath.includes(node.id);
+        const isOnFrontier = stepFrontierSet.has(node.id);
 
         ctx.beginPath();
         ctx.arc(x, y, radius, 0, Math.PI * 2);
@@ -580,6 +608,15 @@ export default function GraphCanvas({
         ctx.lineWidth = isOnOptPath ? 2.5 : 2;
         ctx.strokeStyle = isOnOptPath ? "#2dd4bf" : COLOR.nodeBorder;
         ctx.stroke();
+
+        // Step-by-step frontier: amber ring
+        if (isOnFrontier && !isVisiting) {
+          ctx.beginPath();
+          ctx.arc(x, y, radius + 5, 0, Math.PI * 2);
+          ctx.strokeStyle = "rgba(251, 191, 36, 0.85)";
+          ctx.lineWidth = 2.5;
+          ctx.stroke();
+        }
 
         if (isVisiting) {
           const t = performance.now() / 420;
@@ -769,7 +806,7 @@ export default function GraphCanvas({
         cancelAnimationFrame(frameRef.current);
       }
     };
-  }, [duelMode, duelData, flashSet, ghostPaths, mapMode, nodeCoords, optimalEdgeSet, optimalPath, showUncertainty, sptSet, visitingSet]);
+  }, [duelMode, duelData, flashSet, ghostPaths, mapMode, nodeCoords, optimalEdgeSet, optimalPath, showUncertainty, sptSet, stepFrontierSet, visitingSet]);
 
   // ── Edge click detection ──────────────────────────────────────
   const handleCanvasClick = useCallback(
@@ -795,7 +832,7 @@ export default function GraphCanvas({
       };
 
       let bestIdx = -1;
-      let bestDist = 12; // max click distance in px
+      let bestDist = 24; // max click distance in px
 
       graph.links.forEach((edge) => {
         const a = Number.isInteger(edge.a) ? edge.a : edge.source?.id;
