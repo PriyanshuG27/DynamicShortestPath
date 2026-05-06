@@ -8,8 +8,8 @@ Design and Analysis of Algorithms (DAA) PBL project implementing dynamic shortes
 - Frontend: React + Vite + d3-force canvas visualization with live updates.
 
 ## Project Structure
-- `graph.h`, `heap.h`: graph and heap data structures.
-- `dijkstra.cpp`, `bellman.cpp`, `spt.cpp`, `adversarial.cpp`, `batch.cpp`, `main.cpp`: algorithm engine and JSON command loop.
+- `core_engine/graph.h`, `core_engine/heap.h`: graph and heap data structures.
+- `core_engine/dijkstra.cpp`, `core_engine/bellman.cpp`, `core_engine/spt.cpp`, `core_engine/adversarial.cpp`, `core_engine/batch.cpp`, `core_engine/main.cpp`: algorithm engine and JSON command loop.
 - `server/app.py`, `server/bridge.py`, `server/osm_loader.py`: API, bridge, and optional OSM data loading.
 - `client/src/`: UI (`App.jsx`, `GraphCanvas.jsx`, `Controls.jsx`, `SidePanel.jsx`).
 
@@ -30,7 +30,7 @@ make
 If `make` is unavailable on Windows PowerShell, compile directly:
 
 ```powershell
-g++ -std=c++17 -O2 -Wall -Wextra main.cpp -o main.exe
+g++ -std=c++17 -O2 -Wall -Wextra core_engine/main.cpp -o main.exe
 ```
 
 ### 2) Start Python server

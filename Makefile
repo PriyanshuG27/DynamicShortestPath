@@ -7,8 +7,8 @@ else
 TARGET := main
 endif
 
-SRC := main.cpp
-DEPS := graph.h heap.h dijkstra.cpp bellman.cpp spt.cpp adversarial.cpp batch.cpp
+SRC := core_engine/main.cpp
+DEPS := core_engine/graph.h core_engine/heap.h core_engine/dijkstra.cpp core_engine/bellman.cpp core_engine/spt.cpp core_engine/adversarial.cpp core_engine/batch.cpp
 
 .PHONY: all run clean
 
