@@ -35,3 +35,11 @@ server/cache/
 Thumbs.db
 .vscode/
 .idea/
+
+# Reports and documentations
+*.pdf
+*.html
+
+# Server temporary JSONs
+server/resp*.json
+server/response*.json
